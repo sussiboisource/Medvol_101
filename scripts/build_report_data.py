@@ -257,6 +257,37 @@ def compute_missing_month_ranges(division_tab):
     return [start if start == end else f"{start} to {end}" for start, end in ranges]
 
 
+def resolve_counter_age_cutoff(new_counters_df):
+    """Turns config.COUNTER_AGE_CUTOFF_DATE into an actual "YYYY-MM-DD" string (or None) that
+    db.join_counter_age() can use directly. "auto" means: use the earliest parseable
+    Request_CreatedDate found in the new-counters file itself -- since no row can be earlier
+    than the earliest one, this makes every counter in that file "New" without anyone having
+    to hand-pick a date."""
+    configured = config.COUNTER_AGE_CUTOFF_DATE
+    if configured != "auto":
+        return configured
+
+    if new_counters_df is None or new_counters_df.empty:
+        db.report_issue(
+            "warning",
+            "COUNTER_AGE_CUTOFF_DATE is 'auto' but the new-counters file wasn't found/loaded "
+            "-- every counter will show as 'Old'."
+        )
+        return None
+
+    parsed_dates = pd.to_datetime(new_counters_df[config.NEW_COUNTERS_DATE_COLUMN], errors="coerce")
+    min_date = parsed_dates.min()
+    if pd.isna(min_date):
+        db.report_issue(
+            "warning",
+            "COUNTER_AGE_CUTOFF_DATE is 'auto' but no row in the new-counters file has a "
+            "parseable Request_CreatedDate -- every counter will show as 'Old'."
+        )
+        return None
+
+    return min_date.strftime("%Y-%m-%d")
+
+
 def main():
     run_start = time.perf_counter()
     db.BUILD_ISSUES.clear()
@@ -269,10 +300,12 @@ def main():
         brand_master_df, brand_master_meta = db.load_brand_master()
         new_counters_df, new_counters_meta = db.load_new_counters()
 
+    cutoff_date = resolve_counter_age_cutoff(new_counters_df)
+
     with stage(f"Computing derived columns for {len(orders_df):,} rows (dates, discount math, buckets)"):
         orders_df = add_derived_columns(orders_df)
         orders_df = db.join_brand_master(orders_df, brand_master_df)
-        orders_df = db.join_counter_age(orders_df, new_counters_df, config.COUNTER_AGE_CUTOFF_DATE)
+        orders_df = db.join_counter_age(orders_df, new_counters_df, cutoff_date)
 
         status_counts = orders_df["_status_class"].value_counts().to_dict()
         unclassified_status_display = orders_df.loc[
@@ -281,6 +314,22 @@ def main():
         unclassified_status_counts = unclassified_status_display.value_counts(dropna=False).to_dict()
         unclassified_statuses = sorted(unclassified_status_counts.keys())
         valid_df = orders_df[orders_df["_status_class"] == "Valid"].copy()
+
+        # Per-file breakdown -- without this, "why is month X missing from Division Trend" or
+        # "why are so many rows Unclassified" requires guessing which file is responsible.
+        # Grouping by _source_file (added in db.load_order_lines) makes it mechanical instead.
+        per_file_summary = []
+        for filename, group in orders_df.groupby("_source_file"):
+            valid_group = group[group["_status_class"] == "Valid"]
+            per_file_summary.append({
+                "file": filename,
+                "total_rows": int(len(group)),
+                "valid_rows": int(len(valid_group)),
+                "excluded_rows": int((group["_status_class"] == "Excluded").sum()),
+                "unclassified_rows": int((group["_status_class"] == "Unclassified").sum()),
+                "valid_rows_undated": int(valid_group["_txn_date"].isna().sum()),
+            })
+        per_file_summary.sort(key=lambda r: r["file"])
 
         nan_amount_rows = int(valid_df["_amount"].isna().sum())
         nan_invoice_rows = int(valid_df["_invoice_amount"].isna().sum())
@@ -311,6 +360,16 @@ def main():
         print(f"  Unclassified Order_Status breakdown ({sum(unclassified_status_counts.values()):,} rows total):", flush=True)
         for status, count in sorted(unclassified_status_counts.items(), key=lambda kv: -kv[1])[:20]:
             print(f"    {count:>10,}  {status!r}", flush=True)
+
+    print(f"  Per-file breakdown (total / valid / excluded / unclassified / valid-but-undated):", flush=True)
+    name_width = max((len(r["file"]) for r in per_file_summary), default=10)
+    for r in per_file_summary:
+        flag = "  <-- mostly/all unclassified" if r["total_rows"] and r["unclassified_rows"] / r["total_rows"] > 0.9 else ""
+        print(
+            f"    {r['file']:<{name_width}}  {r['total_rows']:>10,}  {r['valid_rows']:>10,}  "
+            f"{r['excluded_rows']:>10,}  {r['unclassified_rows']:>10,}  {r['valid_rows_undated']:>10,}{flag}",
+            flush=True,
+        )
 
     with stage(f"Aggregating {len(valid_df):,} valid rows into the 3 tabs"):
         counter_tab = build_counter_tab(valid_df)
@@ -343,10 +402,11 @@ def main():
             "duplicate_brand_master_codes": brand_master_meta["duplicate_brand_master_codes"],
             "new_counters_file_present": new_counters_meta["new_counters_file_present"],
             "duplicate_counter_codes": new_counters_meta["duplicate_counter_codes"],
-            "counter_age_cutoff_date": config.COUNTER_AGE_CUTOFF_DATE,
+            "counter_age_cutoff_date": cutoff_date,
             "new_counter_valid_rows": new_counter_rows,
             "trend_window": {"start": config.TREND_START_MONTH, "end": config.TREND_END_MONTH},
             "missing_month_ranges": missing_month_ranges,
+            "per_file_summary": per_file_summary,
             "build_issues": list(db.BUILD_ISSUES),
         },
         "counter_tab": counter_tab,
@@ -370,7 +430,7 @@ def main():
     print(f"  counter_tab records: {len(counter_tab):,}")
     print(f"  division_tab records: {len(division_tab):,}")
     print(f"  np_discounts_tab records: {len(np_discounts_tab):,} (from {len(new_product_skus)} new-product SKUs)")
-    print(f"  counter age cutoff: {config.COUNTER_AGE_CUTOFF_DATE!r} -- {new_counter_rows:,} valid rows classified 'New'")
+    print(f"  counter age cutoff: {cutoff_date!r} (config: {config.COUNTER_AGE_CUTOFF_DATE!r}) -- {new_counter_rows:,} valid rows classified 'New'")
 
 
 if __name__ == "__main__":

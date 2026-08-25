@@ -84,8 +84,11 @@ Two separate reference files now cover this, confirmed by the user — **`item_b
 is NOT a general brand map**, despite its name and the column shapes below; it's repurposed as
 the **new-products list** that powers the NP Discounts tab only (presence of a `Code` = "this SKU
 is a new product"). The actual old+new SKU→Brand lookup for the Division Trend tab's Brand
-drill-down is a separate file, `data/brand_master.csv` (`SKU_ID,BRAND_ID`, currently a
-header-only placeholder awaiting the real ~3,000+ row file).
+drill-down is a separate file, `data/brand_master.csv` (`SKU_ID,BRAND_ID`, 1,720 real rows).
+Built from the user's FY24/FY25/FY26 SKU→Franchise exports — in those exports `Franchise` is
+what maps to this file's `BRAND_ID` column, distinct from the `Franchise` column inside
+`item_brand_mapping.csv` below (that one isn't used by the pipeline at all). Gitignored, like
+the new-counters file — real business data, copied manually between machines, never pushed.
 
 `item_brand_mapping.csv` columns (226 real rows currently):
 

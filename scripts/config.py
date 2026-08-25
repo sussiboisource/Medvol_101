@@ -69,9 +69,18 @@ UNMAPPED_BRAND_LABEL = "Unmapped"
 # New/Old counter age cutoff, computed ONCE at build time. Reverted from a live in-browser
 # picker: at real data scale, shipping one JSON record per counter for live classification
 # produced a 300k+ record Counter tab that made the dashboard unusable (see ARCHITECTURE.md).
-# None = every counter is "Old". To change the cutoff, edit this and rerun the build script --
-# a rebuild takes seconds, so this is not a meaningful loss of flexibility in practice.
-COUNTER_AGE_CUTOFF_DATE = None
+# Three modes:
+#   "auto"        -- use the EARLIEST parseable Request_CreatedDate found in the new-counters
+#                    file itself as the cutoff. Since no row can be earlier than the earliest
+#                    one, this makes every counter in that file "New" -- matches the file's own
+#                    name ("New Medvol customers from 1st April 2025") without hand-picking a
+#                    date. This is the default.
+#   "YYYY-MM-DD"  -- a fixed cutoff date string, if you want something other than the file's
+#                    own earliest date.
+#   None          -- disable the split entirely; every counter shows as "Old".
+# To change the mode, edit this and rerun the build script -- a rebuild takes seconds, so this
+# is not a meaningful loss of flexibility in practice.
+COUNTER_AGE_CUTOFF_DATE = "auto"
 
 # Division Trend tab's intended time window. Informational only -- data outside this range
 # is not clipped, just what the tab is meant to cover. FY27 is being treated as running through

@@ -13,6 +13,9 @@ data/*.xlsb
 # Counter registration log - contains phone numbers, GST numbers, drug license numbers
 data/New Medvol customers*.csv
 
+# Brand master - real SKU->Brand business data, not for the repo
+data/brand_master.csv
+
 # Generated aggregate output - also real sales figures, derived from the above
 output/report_data.json
 output/verification_report.txt
