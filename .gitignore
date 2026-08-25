@@ -1,0 +1,17 @@
+# Raw order-line data - contains real sales figures, not for the repo
+data/1*.xlsx
+data/2*.xlsx
+data/3*.xlsx
+data/4*.xlsx
+data/5*.xlsx
+data/6*.xlsx
+data/7*.xlsx
+data/8*.xlsx
+data/9*.xlsx
+
+# Generated aggregate output - also real sales figures, derived from the above
+output/report_data.json
+
+# Python cache
+scripts/__pycache__/
+*.pyc

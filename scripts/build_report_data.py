@@ -1,0 +1,232 @@
+"""The one script you actually run. Pulls data via db.py, computes every derived column,
+classifies rows, aggregates into the two tabs' shapes, and writes output/report_data.json --
+then embeds that same JSON into dashboard.html so it also works opened directly (file://),
+with no server needed.
+
+Usage: python build_report_data.py
+"""
+
+import json
+import re
+from datetime import datetime, timezone
+
+import pandas as pd
+
+import config
+
+DASHBOARD_HTML_PATH = config.PROJECT_ROOT / "dashboard.html"
+REPORT_DATA_SCRIPT_RE = re.compile(
+    r'(<script type="application/json" id="report-data">)(.*?)(</script>)',
+    re.DOTALL,
+)
+
+
+def embed_data_in_dashboard(report_json_str):
+    if not DASHBOARD_HTML_PATH.exists():
+        return
+    html = DASHBOARD_HTML_PATH.read_text(encoding="utf-8")
+    safe_json = report_json_str.replace("</script>", "<\\/script>")
+    new_html, count = REPORT_DATA_SCRIPT_RE.subn(
+        lambda m: m.group(1) + safe_json + m.group(3), html
+    )
+    if count == 0:
+        print("WARNING: could not find the report-data <script> tag in dashboard.html -- "
+              "the embedded copy was not updated. dashboard.html will still work if served "
+              "over HTTP (output/report_data.json is current).")
+        return
+    DASHBOARD_HTML_PATH.write_text(new_html, encoding="utf-8")
+import db
+
+
+def to_numeric(series, fill_value=None):
+    numeric = pd.to_numeric(series, errors="coerce")
+    if fill_value is not None:
+        numeric = numeric.fillna(fill_value)
+    return numeric
+
+
+def classify_status(status):
+    if status in config.VALID_ORDER_STATUSES:
+        return "Valid"
+    status_lower = str(status).lower()
+    if any(keyword in status_lower for keyword in config.EXCLUDED_STATUS_KEYWORDS):
+        return "Excluded"
+    return "Unclassified"
+
+
+def compute_canonical_date(df):
+    primary = pd.to_datetime(df[config.PRIMARY_DATE_COLUMN], errors="coerce")
+    fallback = pd.to_datetime(df[config.FALLBACK_DATE_COLUMN], errors="coerce")
+    return primary.fillna(fallback)
+
+
+def canonicalize_labels(df):
+    """The same Item_Code can carry slightly different Item_Description/Division_Name text
+    across export batches (casing drift, e.g. "Ketorol DT" vs "Ketorol Dt"). Without this, the
+    same SKU would silently split into multiple table rows. Pick the most common text per
+    Item_Code and use it everywhere, so one SKU is always one row."""
+    df = df.copy()
+    for col in ["Item_Description", "Division_Name"]:
+        mode_map = df.groupby(config.SKU_ID_COLUMN)[col].agg(
+            lambda s: s.mode().iloc[0] if not s.mode().empty else s.iloc[0]
+        )
+        df[col] = df[config.SKU_ID_COLUMN].map(mode_map)
+    return df
+
+
+def add_derived_columns(df):
+    df = df.copy()
+    df = canonicalize_labels(df)
+
+    df["_status_class"] = df["Order_Status"].apply(classify_status)
+    df["_txn_date"] = compute_canonical_date(df)
+
+    df["_ptr"] = to_numeric(df["PTR"], fill_value=0.0)
+    df["_quantity"] = to_numeric(df["Quantity"], fill_value=0.0)
+    df["_discount_on_ptr"] = to_numeric(df["DiscountOnPTR"], fill_value=0.0)
+    df["_cash_discount"] = to_numeric(df["Cash_Discount"], fill_value=0.0)
+    df["_amount"] = to_numeric(df["Amount"])
+    df["_invoice_amount"] = to_numeric(df["InvoiceAmount"])
+
+    df["_gross_sales"] = df["_ptr"] * df["_quantity"]
+    df["_total_discount_pct"] = 100 * (
+        1 - (1 - df["_discount_on_ptr"] / 100) * (1 - df["_cash_discount"] / 100)
+    )
+
+    df["_bucket_ptr_only"] = pd.cut(
+        df["_discount_on_ptr"], bins=config.DISCOUNT_BUCKET_EDGES,
+        labels=config.DISCOUNT_BUCKET_LABELS, right=False,
+    )
+    df["_bucket_total"] = pd.cut(
+        df["_total_discount_pct"], bins=config.DISCOUNT_BUCKET_EDGES,
+        labels=config.DISCOUNT_BUCKET_LABELS, right=False,
+    )
+    return df
+
+
+def build_counter_tab(valid_df):
+    records = []
+    group_cols = ["Counter_Age", config.SKU_ID_COLUMN, "Item_Description", "Brand", "Division_Name"]
+
+    for bucket_col, discount_type in (("_bucket_ptr_only", "ptr_only"), ("_bucket_total", "total")):
+        grouped = (
+            valid_df.groupby(group_cols + [bucket_col], observed=True)["_amount"]
+            .agg(amount="sum", order_lines="count")
+            .reset_index()
+            .rename(columns={bucket_col: "bucket"})
+        )
+        grouped["discount_type"] = discount_type
+        records.extend(grouped.to_dict(orient="records"))
+
+    return [
+        {
+            "counter_age": r["Counter_Age"],
+            "item_code": r[config.SKU_ID_COLUMN],
+            "item_description": r["Item_Description"],
+            "brand": r["Brand"],
+            "division": r["Division_Name"],
+            "discount_type": r["discount_type"],
+            "bucket": str(r["bucket"]),
+            "amount": round(float(r["amount"]), 2),
+            "order_lines": int(r["order_lines"]),
+        }
+        for r in records
+    ]
+
+
+def build_division_tab(valid_df):
+    df = valid_df.copy()
+    df["_month"] = df["_txn_date"].dt.to_period("M").astype(str)
+
+    group_cols = ["_month", config.SKU_ID_COLUMN, "Item_Description", "Brand", "Division_Name"]
+    grouped = (
+        df.groupby(group_cols, observed=True)
+        .agg(
+            amount_sum=("_amount", "sum"),
+            invoice_amount_sum=("_invoice_amount", "sum"),
+            gross_sales_sum=("_gross_sales", "sum"),
+            order_lines=("_amount", "count"),
+        )
+        .reset_index()
+    )
+
+    return [
+        {
+            "month": r["_month"],
+            "item_code": r[config.SKU_ID_COLUMN],
+            "item_description": r["Item_Description"],
+            "brand": r["Brand"],
+            "division": r["Division_Name"],
+            "amount_sum": round(float(r["amount_sum"]), 2),
+            "invoice_amount_sum": round(float(r["invoice_amount_sum"]), 2),
+            "gross_sales_sum": round(float(r["gross_sales_sum"]), 2),
+            "order_lines": int(r["order_lines"]),
+        }
+        for r in grouped.to_dict(orient="records")
+    ]
+
+
+def main():
+    orders_df, load_meta = db.load_order_lines()
+    brand_df, brand_meta = db.load_brand_mapping()
+    counter_dates_df, counter_meta = db.load_counter_creation_dates()
+
+    orders_df = add_derived_columns(orders_df)
+    orders_df = db.join_brand(orders_df, brand_df)
+    orders_df = db.join_counter_age(orders_df, counter_dates_df, config.COUNTER_AGE_CUTOFF_DATE)
+
+    status_counts = orders_df["_status_class"].value_counts().to_dict()
+    unclassified_statuses = sorted(
+        orders_df.loc[orders_df["_status_class"] == "Unclassified", "Order_Status"].unique().tolist()
+    )
+    valid_df = orders_df[orders_df["_status_class"] == "Valid"].copy()
+
+    nan_amount_rows = int(valid_df["_amount"].isna().sum())
+    nan_invoice_rows = int(valid_df["_invoice_amount"].isna().sum())
+    unmapped_brand_rows = int((valid_df["Brand"] == config.UNMAPPED_BRAND_LABEL).sum())
+
+    counter_tab = build_counter_tab(valid_df)
+    division_tab = build_division_tab(valid_df)
+
+    output = {
+        "meta": {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "row_counts": {
+                "total": int(len(orders_df)),
+                "valid": int(status_counts.get("Valid", 0)),
+                "excluded": int(status_counts.get("Excluded", 0)),
+                "unclassified": int(status_counts.get("Unclassified", 0)),
+            },
+            "unclassified_statuses": unclassified_statuses,
+            "valid_rows_missing_amount": nan_amount_rows,
+            "valid_rows_missing_invoice_amount": nan_invoice_rows,
+            "valid_rows_with_unmapped_brand": unmapped_brand_rows,
+            "files_loaded": load_meta["files_loaded"],
+            "files_skipped": load_meta["files_skipped"],
+            "duplicate_rows_dropped": load_meta["duplicate_rows_dropped"],
+            "duplicate_rows_conflicting": load_meta["duplicate_rows_conflicting"],
+            "conflicting_keys_sample": load_meta["conflicting_keys_sample"],
+            "brand_mapping_files": brand_meta["brand_mapping_files"],
+            "duplicate_brand_codes": brand_meta["duplicate_brand_codes"],
+            "counter_creation_dates_file_present": counter_meta["counter_creation_dates_file_present"],
+            "duplicate_counter_codes": counter_meta["duplicate_counter_codes"],
+        },
+        "counter_tab": counter_tab,
+        "division_tab": division_tab,
+    }
+
+    config.OUTPUT_DIR.mkdir(exist_ok=True)
+    report_json_str = json.dumps(output, indent=2)
+    with open(config.REPORT_JSON_PATH, "w", encoding="utf-8") as f:
+        f.write(report_json_str)
+    embed_data_in_dashboard(report_json_str)
+
+    print(f"Wrote {config.REPORT_JSON_PATH}")
+    print(f"Embedded data into {DASHBOARD_HTML_PATH.name} -- it now works opened directly (file://), no server needed.")
+    print(f"  rows: {output['meta']['row_counts']}")
+    print(f"  counter_tab records: {len(counter_tab)}")
+    print(f"  division_tab records: {len(division_tab)}")
+
+
+if __name__ == "__main__":
+    main()

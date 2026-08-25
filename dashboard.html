@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Medvol Discount &amp; Sales Dashboard</title>
+<style>
+  :root {
+    --bg: #f7f8fa; --panel: #ffffff; --border: #e2e5ea; --text: #1c2128; --muted: #6b7280;
+    --accent: #2563eb; --accent-soft: #dbeafe; --bar: #2563eb; --bar2: #93c5fd;
+    --line1: #2563eb; --line2: #dc2626; --line3: #059669; --line4: #d97706; --line5: #7c3aed;
+    --warn-bg: #fff7ed; --warn-border: #fdba74; --warn-text: #9a3412;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg); color: var(--text); font-size: 14px;
+  }
+  header { padding: 20px 28px 0; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); padding: 0 28px; }
+  .tab-btn {
+    padding: 10px 18px; border: none; background: none; cursor: pointer; font-size: 14px;
+    color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px;
+  }
+  .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+  .tab-panel { display: none; padding: 20px 28px 40px; }
+  .tab-panel.active { display: block; }
+  .controls {
+    display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-end;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px 18px; margin-bottom: 18px;
+  }
+  .control-group { display: flex; flex-direction: column; gap: 6px; }
+  .control-group label.group-label { font-size: 11px; text-transform: uppercase; color: var(--muted); letter-spacing: .03em; }
+  .checkbox-row, .radio-row { display: flex; gap: 12px; }
+  .checkbox-row label, .radio-row label { display: flex; align-items: center; gap: 5px; font-size: 13px; cursor: pointer; }
+  select {
+    padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel);
+    font-size: 13px; min-width: 160px;
+  }
+  .panel-box { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px 18px; margin-bottom: 18px; }
+  .panel-title { font-size: 13px; font-weight: 600; margin: 0 0 12px; }
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  th, td { padding: 6px 8px; text-align: right; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  thead th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; }
+  tbody tr:hover { background: #f2f4f7; }
+  .empty-state { color: var(--muted); padding: 24px; text-align: center; font-size: 13px; }
+  .meta-banner {
+    background: var(--warn-bg); border: 1px solid var(--warn-border); color: var(--warn-text);
+    border-radius: 8px; padding: 10px 16px; margin: 0 28px 16px; font-size: 12.5px; line-height: 1.5;
+  }
+  .entity-list { max-height: 220px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; min-width: 220px; }
+  .entity-list label { display: flex; align-items: center; gap: 6px; font-size: 12.5px; padding: 3px 0; cursor: pointer; }
+  svg text { font-family: inherit; }
+  .axis-label { fill: var(--muted); font-size: 10.5px; }
+  .bar-value { fill: var(--text); font-size: 10px; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 8px; font-size: 12px; }
+  .legend-item { display: flex; align-items: center; gap: 6px; }
+  .legend-swatch { width: 10px; height: 10px; border-radius: 2px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Medvol Discount &amp; Sales Dashboard</h1>
+  <div class="subtitle" id="generated-at"></div>
+</header>
+
+<div class="tabs">
+  <button class="tab-btn active" data-tab="counter">Counter Tab</button>
+  <button class="tab-btn" data-tab="division">Division Trend Tab</button>
+</div>
+
+<div id="meta-banner-slot"></div>
+
+<script type="application/json" id="report-data"></script>
+
+<div class="tab-panel active" id="panel-counter">
+  <div class="controls">
+    <div class="control-group">
+      <label class="group-label">Counter Age</label>
+      <div class="checkbox-row">
+        <label><input type="checkbox" id="age-old" checked> Old</label>
+        <label><input type="checkbox" id="age-new"> New</label>
+      </div>
+    </div>
+    <div class="control-group">
+      <label class="group-label">Discount Filter</label>
+      <div class="radio-row">
+        <label><input type="radio" name="discount-type" value="ptr_only" checked> DiscountOnPTR only</label>
+        <label><input type="radio" name="discount-type" value="total"> Total discount (PTR + Cash)</label>
+      </div>
+    </div>
+    <div class="control-group">
+      <label class="group-label">Group table by</label>
+      <select id="counter-group-by">
+        <option value="item_code">SKU</option>
+        <option value="brand">Brand</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="panel-box">
+    <p class="panel-title">Sales by discount range</p>
+    <div id="counter-bar-chart"></div>
+  </div>
+
+  <div class="panel-box">
+    <p class="panel-title" id="counter-table-title">Sales by SKU x discount range</p>
+    <div id="counter-table"></div>
+  </div>
+</div>
+
+<div class="tab-panel" id="panel-division">
+  <div class="controls">
+    <div class="control-group">
+      <label class="group-label">Level</label>
+      <select id="division-level">
+        <option value="division">Division</option>
+        <option value="brand">Brand</option>
+        <option value="item_code">SKU</option>
+      </select>
+    </div>
+    <div class="control-group">
+      <label class="group-label">Metric</label>
+      <div class="radio-row">
+        <label><input type="radio" name="division-metric" value="medvol" checked> Medvol % (Amount / Gross)</label>
+        <label><input type="radio" name="division-metric" value="net_sales"> Net Sales % (Invoice / Gross)</label>
+      </div>
+    </div>
+    <div class="control-group">
+      <label class="group-label">Entities shown (top 5 by sales, editable)</label>
+      <div class="entity-list" id="division-entity-list"></div>
+    </div>
+  </div>
+
+  <div class="panel-box">
+    <p class="panel-title" id="division-chart-title">% over time</p>
+    <div id="division-line-chart"></div>
+    <div class="legend" id="division-legend"></div>
+  </div>
+</div>
+
+<script>
+const LINE_COLORS = ['var(--line1)', 'var(--line2)', 'var(--line3)', 'var(--line4)', 'var(--line5)'];
+const BUCKET_ORDER = ["<5%", "5-15%", "15-25%", "25-35%", "35-45%", "45-55%", "55-65%", "65-80%", ">80%"];
+
+const LEVEL_LABELS = { division: 'division', brand: 'brand', item_code: 'SKU' };
+
+let REPORT = null;
+
+const embedded = document.getElementById('report-data');
+if (embedded && embedded.textContent.trim()) {
+  REPORT = JSON.parse(embedded.textContent);
+  init();
+} else {
+  fetch('./output/report_data.json')
+    .then(r => r.json())
+    .then(data => { REPORT = data; init(); })
+    .catch(err => {
+      document.body.innerHTML = '<div class="empty-state">No data embedded and could not load output/report_data.json — run scripts/build_report_data.py first.<br>' + err + '</div>';
+    });
+}
+
+function init() {
+  document.getElementById('generated-at').textContent = 'Generated ' + REPORT.meta.generated_at;
+  renderMetaBanner();
+
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+      btn.classList.add('active');
+      document.getElementById('panel-' + btn.dataset.tab).classList.add('active');
+    });
+  });
+
+  ['age-old', 'age-new'].forEach(id => document.getElementById(id).addEventListener('change', renderCounterTab));
+  document.querySelectorAll('input[name="discount-type"]').forEach(el => el.addEventListener('change', renderCounterTab));
+  document.getElementById('counter-group-by').addEventListener('change', renderCounterTab);
+
+  document.getElementById('division-level').addEventListener('change', () => { populateDivisionEntities(); renderDivisionTab(); });
+  document.querySelectorAll('input[name="division-metric"]').forEach(el => el.addEventListener('change', renderDivisionTab));
+
+  renderCounterTab();
+  populateDivisionEntities();
+  renderDivisionTab();
+}
+
+function renderMetaBanner() {
+  const m = REPORT.meta;
+  const notes = [];
+  if (m.row_counts.unclassified > 0) {
+    notes.push(m.row_counts.unclassified + ' row(s) had an unrecognized Order_Status (' + m.unclassified_statuses.join(', ') + ') — excluded from totals, shown here for visibility.');
+  }
+  if (m.files_skipped && m.files_skipped.length) {
+    notes.push(m.files_skipped.length + ' file(s) in data/ were skipped (no parseable period, no file_periods.csv entry): ' + m.files_skipped.join(', '));
+  }
+  if (m.duplicate_rows_conflicting > 0) {
+    notes.push(m.duplicate_rows_conflicting + ' order line(s) appear in multiple files with DIFFERENT values — kept all copies, needs manual review.');
+  }
+  if (m.valid_rows_with_unmapped_brand > 0) {
+    notes.push(m.valid_rows_with_unmapped_brand + ' valid row(s) have no brand match yet (Unmapped) — brand-level views are partial until the full item-brand list is loaded.');
+  }
+  if (!m.counter_creation_dates_file_present) {
+    notes.push('No counter_creation_dates.csv yet — every counter is shown as "Old".');
+  }
+  if (!notes.length) return;
+  const el = document.createElement('div');
+  el.className = 'meta-banner';
+  el.innerHTML = '<strong>Data notes:</strong><br>' + notes.map(n => '&bull; ' + n).join('<br>');
+  document.getElementById('meta-banner-slot').appendChild(el);
+}
+
+// ---------- Counter tab ----------
+
+function getCounterFilters() {
+  const ages = [];
+  if (document.getElementById('age-old').checked) ages.push('Old');
+  if (document.getElementById('age-new').checked) ages.push('New');
+  const discountType = document.querySelector('input[name="discount-type"]:checked').value;
+  const groupBy = document.getElementById('counter-group-by').value;
+  return { ages, discountType, groupBy };
+}
+
+function renderCounterTab() {
+  const { ages, discountType, groupBy } = getCounterFilters();
+  const rows = REPORT.counter_tab.filter(r => ages.includes(r.counter_age) && r.discount_type === discountType);
+
+  const bucketTotals = {};
+  BUCKET_ORDER.forEach(b => bucketTotals[b] = 0);
+  rows.forEach(r => { bucketTotals[r.bucket] = (bucketTotals[r.bucket] || 0) + r.amount; });
+  renderBarChart(document.getElementById('counter-bar-chart'), BUCKET_ORDER, BUCKET_ORDER.map(b => bucketTotals[b]));
+
+  const groupLabel = groupBy === 'brand' ? 'Brand' : 'SKU';
+  document.getElementById('counter-table-title').textContent = 'Sales by ' + groupLabel + ' x discount range';
+
+  const byEntity = {};
+  rows.forEach(r => {
+    const key = groupBy === 'brand' ? r.brand : (r.item_code + ' — ' + r.item_description);
+    if (!byEntity[key]) byEntity[key] = { total: 0, buckets: {} };
+    byEntity[key].buckets[r.bucket] = (byEntity[key].buckets[r.bucket] || 0) + r.amount;
+    byEntity[key].total += r.amount;
+  });
+  const sortedEntities = Object.entries(byEntity).sort((a, b) => b[1].total - a[1].total).slice(0, 50);
+  renderCounterTable(sortedEntities, groupLabel);
+}
+
+function renderCounterTable(sortedEntities, groupLabel) {
+  const container = document.getElementById('counter-table');
+  if (!sortedEntities.length) {
+    container.innerHTML = '<div class="empty-state">No data for this selection.</div>';
+    return;
+  }
+  let html = '<table><thead><tr><th>' + groupLabel + '</th>' +
+    BUCKET_ORDER.map(b => '<th>' + b + '</th>').join('') + '<th>Total</th></tr></thead><tbody>';
+  sortedEntities.forEach(([name, data]) => {
+    html += '<tr><td>' + escapeHtml(name) + '</td>' +
+      BUCKET_ORDER.map(b => '<td>' + formatMoney(data.buckets[b] || 0) + '</td>').join('') +
+      '<td><strong>' + formatMoney(data.total) + '</strong></td></tr>';
+  });
+  html += '</tbody></table>';
+  if (sortedEntities.length === 50) html += '<div class="empty-state">Showing top 50 by total sales.</div>';
+  container.innerHTML = html;
+}
+
+// ---------- Division tab ----------
+
+function populateDivisionEntities() {
+  const level = document.getElementById('division-level').value;
+  const totals = {};
+  REPORT.division_tab.forEach(r => {
+    const key = r[level];
+    totals[key] = (totals[key] || 0) + r.amount_sum;
+  });
+  const top5 = Object.entries(totals).sort((a, b) => b[1] - a[1]).slice(0, 5).map(e => e[0]);
+
+  const container = document.getElementById('division-entity-list');
+  const allKeys = Object.keys(totals).sort();
+  container.innerHTML = allKeys.map(key =>
+    '<label><input type="checkbox" class="division-entity-checkbox" value="' + escapeHtml(key) + '"' +
+    (top5.includes(key) ? ' checked' : '') + '> ' + escapeHtml(key) + '</label>'
+  ).join('');
+  container.querySelectorAll('.division-entity-checkbox').forEach(cb => cb.addEventListener('change', renderDivisionTab));
+}
+
+function renderDivisionTab() {
+  const level = document.getElementById('division-level').value;
+  const metric = document.querySelector('input[name="division-metric"]:checked').value;
+  const selected = Array.from(document.querySelectorAll('.division-entity-checkbox:checked')).map(cb => cb.value);
+
+  document.getElementById('division-chart-title').textContent =
+    (metric === 'medvol' ? 'Medvol %' : 'Net Sales %') + ' over time, by ' + LEVEL_LABELS[level];
+
+  // month -> entity -> {num, den}
+  const byMonthEntity = {};
+  REPORT.division_tab.forEach(r => {
+    const key = r[level];
+    if (!selected.includes(key)) return;
+    if (!byMonthEntity[r.month]) byMonthEntity[r.month] = {};
+    if (!byMonthEntity[r.month][key]) byMonthEntity[r.month][key] = { num: 0, den: 0 };
+    const num = metric === 'medvol' ? r.amount_sum : r.invoice_amount_sum;
+    byMonthEntity[r.month][key].num += num;
+    byMonthEntity[r.month][key].den += r.gross_sales_sum;
+  });
+
+  const months = Object.keys(byMonthEntity).sort();
+  const series = selected.map((key, i) => ({
+    name: key,
+    color: LINE_COLORS[i % LINE_COLORS.length],
+    points: months.map(m => {
+      const cell = byMonthEntity[m] && byMonthEntity[m][key];
+      if (!cell || cell.den === 0) return null;
+      return { x: m, y: 100 * cell.num / cell.den };
+    }),
+  }));
+
+  renderLineChart(document.getElementById('division-line-chart'), months, series);
+
+  const legend = document.getElementById('division-legend');
+  legend.innerHTML = series.map(s =>
+    '<div class="legend-item"><span class="legend-swatch" style="background:' + s.color + '"></span>' + escapeHtml(s.name) + '</div>'
+  ).join('');
+}
+
+// ---------- tiny SVG chart helpers ----------
+
+function renderBarChart(container, categories, values) {
+  if (!categories.length || values.every(v => v === 0)) {
+    container.innerHTML = '<div class="empty-state">No data for this selection.</div>';
+    return;
+  }
+  const width = 900, height = 260, padL = 60, padB = 60, padT = 16, padR = 16;
+  const chartW = width - padL - padR, chartH = height - padT - padB;
+  const maxVal = Math.max(...values, 1);
+  const barW = chartW / categories.length;
+
+  let bars = '';
+  categories.forEach((cat, i) => {
+    const v = values[i];
+    const barH = (v / maxVal) * chartH;
+    const x = padL + i * barW + barW * 0.15;
+    const y = padT + chartH - barH;
+    const w = barW * 0.7;
+    bars += `<rect x="${x}" y="${y}" width="${w}" height="${barH}" fill="var(--bar)" rx="2"></rect>`;
+    bars += `<text class="bar-value" x="${x + w / 2}" y="${y - 4}" text-anchor="middle">${formatMoneyShort(v)}</text>`;
+    bars += `<text class="axis-label" x="${x + w / 2}" y="${height - padB + 16}" text-anchor="middle">${cat}</text>`;
+  });
+
+  container.innerHTML = `<svg viewBox="0 0 ${width} ${height}" style="width:100%;height:auto;">
+    <line x1="${padL}" y1="${padT + chartH}" x2="${width - padR}" y2="${padT + chartH}" stroke="var(--border)"></line>
+    ${bars}
+  </svg>`;
+}
+
+function renderLineChart(container, months, series) {
+  const anyPoints = series.some(s => s.points.some(p => p !== null));
+  if (!months.length || !anyPoints) {
+    container.innerHTML = '<div class="empty-state">No data for this selection.</div>';
+    return;
+  }
+  const width = 900, height = 300, padL = 50, padB = 50, padT = 16, padR = 16;
+  const chartW = width - padL - padR, chartH = height - padT - padB;
+
+  const allY = series.flatMap(s => s.points.filter(p => p !== null).map(p => p.y));
+  const maxY = Math.max(...allY, 10) * 1.1;
+  const minY = Math.min(0, ...allY);
+  const xStep = months.length > 1 ? chartW / (months.length - 1) : 0;
+
+  const xFor = i => padL + i * xStep;
+  const yFor = v => padT + chartH - ((v - minY) / (maxY - minY || 1)) * chartH;
+
+  let lines = '';
+  series.forEach(s => {
+    let d = '';
+    s.points.forEach((p, i) => {
+      if (p === null) return;
+      const cmd = d === '' ? 'M' : 'L';
+      d += `${cmd}${xFor(i)},${yFor(p.y)} `;
+    });
+    if (d) lines += `<path d="${d.trim()}" fill="none" stroke="${s.color}" stroke-width="2"></path>`;
+    s.points.forEach((p, i) => {
+      if (p === null) return;
+      lines += `<circle cx="${xFor(i)}" cy="${yFor(p.y)}" r="2.5" fill="${s.color}"></circle>`;
+    });
+  });
+
+  const labelEvery = Math.max(1, Math.ceil(months.length / 12));
+  let xLabels = '';
+  months.forEach((m, i) => {
+    if (i % labelEvery !== 0) return;
+    xLabels += `<text class="axis-label" x="${xFor(i)}" y="${height - padB + 16}" text-anchor="middle">${m}</text>`;
+  });
+
+  const gridLines = 4;
+  let yGrid = '';
+  for (let g = 0; g <= gridLines; g++) {
+    const val = minY + (g / gridLines) * (maxY - minY);
+    const y = yFor(val);
+    yGrid += `<line x1="${padL}" y1="${y}" x2="${width - padR}" y2="${y}" stroke="var(--border)" stroke-dasharray="2,3"></line>`;
+    yGrid += `<text class="axis-label" x="${padL - 8}" y="${y + 3}" text-anchor="end">${val.toFixed(0)}%</text>`;
+  }
+
+  container.innerHTML = `<svg viewBox="0 0 ${width} ${height}" style="width:100%;height:auto;">
+    ${yGrid}
+    ${lines}
+    ${xLabels}
+  </svg>`;
+}
+
+function formatMoney(v) {
+  return v.toLocaleString('en-IN', { maximumFractionDigits: 0 });
+}
+function formatMoneyShort(v) {
+  if (v >= 100000) return (v / 100000).toFixed(1) + 'L';
+  if (v >= 1000) return (v / 1000).toFixed(1) + 'k';
+  return v.toFixed(0);
+}
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+</script>
+
+</body>
+</html>
