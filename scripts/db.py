@@ -9,12 +9,19 @@ project should call functions here instead of touching data/ itself.
 """
 
 import re
+import time
 import warnings
 from pathlib import Path
 
 import pandas as pd
 
 import config
+
+
+def progress_bar(current, total, width=24):
+    """Text progress bar, e.g. '[################--------] 16/24'. No external deps."""
+    filled = int(width * current / total) if total else width
+    return "[" + "#" * filled + "-" * (width - filled) + f"] {current}/{total}"
 
 
 MONTH_NUMBERS = {
@@ -140,10 +147,14 @@ def load_order_lines():
     """Loads every discovered order file, stacks them, dedupes rows that appear identically
     in more than one overlapping file. Returns (DataFrame, meta_dict)."""
     file_infos, skipped_files = discover_order_files()
+    total_files = len(file_infos)
 
     frames = []
-    for info in file_infos:
+    for i, info in enumerate(file_infos, start=1):
+        print(f"{progress_bar(i - 1, total_files)} reading {info['filename']} ...", flush=True)
+        t0 = time.perf_counter()
         df = _read_one_file(info["path"])
+        elapsed = time.perf_counter() - t0
         missing_cols = set(config.EXPECTED_COLUMNS) - set(df.columns)
         if missing_cols:
             warnings.warn(f"{info['filename']} is missing expected columns: {missing_cols}")
@@ -151,6 +162,7 @@ def load_order_lines():
         df["_period_start"] = str(info["period_start"])
         df["_period_end"] = str(info["period_end"])
         frames.append(df)
+        print(f"{progress_bar(i, total_files)} done: {len(df):,} rows in {elapsed:.1f}s", flush=True)
 
     if not frames:
         return pd.DataFrame(columns=config.EXPECTED_COLUMNS), {
@@ -158,6 +170,8 @@ def load_order_lines():
             "duplicate_rows_dropped": 0, "duplicate_rows_conflicting": 0,
         }
 
+    print("Combining files and checking for duplicate rows across overlapping files ...", flush=True)
+    t0 = time.perf_counter()
     combined = pd.concat(frames, ignore_index=True)
 
     dup_key = [config.SKU_ID_COLUMN, "Order_Number"]
@@ -177,6 +191,7 @@ def load_order_lines():
         rows_to_drop.extend(group.index[1:].tolist())
 
     deduped = combined.drop(index=rows_to_drop)
+    print(f"  done in {time.perf_counter() - t0:.1f}s ({len(deduped):,} rows after dedup)", flush=True)
 
     meta = {
         "files_loaded": [info["filename"] for info in file_infos],

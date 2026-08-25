@@ -8,12 +8,24 @@ Usage: python build_report_data.py
 
 import json
 import re
+import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 import pandas as pd
 
 import config
 import db
+
+
+@contextmanager
+def stage(label):
+    """Prints a start/done line with elapsed time around a block, so a long-running step
+    never goes silent -- that's what caused the "is it stuck?" confusion before."""
+    print(f"{label} ...", flush=True)
+    t0 = time.perf_counter()
+    yield
+    print(f"  done in {time.perf_counter() - t0:.1f}s", flush=True)
 
 DASHBOARD_HTML_PATH = config.PROJECT_ROOT / "dashboard.html"
 REPORT_DATA_SCRIPT_RE = re.compile(
@@ -228,31 +240,38 @@ def compute_missing_month_ranges(division_tab):
 
 
 def main():
+    run_start = time.perf_counter()
+
+    print("Loading order-line files (data/) ...", flush=True)
     orders_df, load_meta = db.load_order_lines()
-    new_products_df, new_products_meta = db.load_new_products()
-    brand_master_df, brand_master_meta = db.load_brand_master()
-    new_counters_df, new_counters_meta = db.load_new_counters()
 
-    orders_df = add_derived_columns(orders_df)
-    orders_df = db.join_brand_master(orders_df, brand_master_df)
+    with stage("Loading reference files (new-products, brand master, new-counters)"):
+        new_products_df, new_products_meta = db.load_new_products()
+        brand_master_df, brand_master_meta = db.load_brand_master()
+        new_counters_df, new_counters_meta = db.load_new_counters()
 
-    status_counts = orders_df["_status_class"].value_counts().to_dict()
-    unclassified_statuses = sorted(
-        orders_df.loc[orders_df["_status_class"] == "Unclassified", "Order_Status"].unique().tolist()
-    )
-    valid_df = orders_df[orders_df["_status_class"] == "Valid"].copy()
+    with stage(f"Computing derived columns for {len(orders_df):,} rows (dates, discount math, buckets)"):
+        orders_df = add_derived_columns(orders_df)
+        orders_df = db.join_brand_master(orders_df, brand_master_df)
 
-    nan_amount_rows = int(valid_df["_amount"].isna().sum())
-    nan_invoice_rows = int(valid_df["_invoice_amount"].isna().sum())
-    unmapped_brand_rows = int((valid_df["Brand"] == config.UNMAPPED_BRAND_LABEL).sum())
+        status_counts = orders_df["_status_class"].value_counts().to_dict()
+        unclassified_statuses = sorted(
+            orders_df.loc[orders_df["_status_class"] == "Unclassified", "Order_Status"].unique().tolist()
+        )
+        valid_df = orders_df[orders_df["_status_class"] == "Valid"].copy()
 
-    new_product_skus = db.new_product_sku_set(new_products_df)
-    counter_creation_dates = db.counter_creation_date_lookup(new_counters_df)
+        nan_amount_rows = int(valid_df["_amount"].isna().sum())
+        nan_invoice_rows = int(valid_df["_invoice_amount"].isna().sum())
+        unmapped_brand_rows = int((valid_df["Brand"] == config.UNMAPPED_BRAND_LABEL).sum())
 
-    counter_tab = build_counter_tab(valid_df)
-    division_tab = build_division_tab(valid_df)
-    np_discounts_tab = build_np_discounts_tab(valid_df, new_product_skus)
-    missing_month_ranges = compute_missing_month_ranges(division_tab)
+        new_product_skus = db.new_product_sku_set(new_products_df)
+        counter_creation_dates = db.counter_creation_date_lookup(new_counters_df)
+
+    with stage(f"Aggregating {len(valid_df):,} valid rows into the 3 tabs"):
+        counter_tab = build_counter_tab(valid_df)
+        division_tab = build_division_tab(valid_df)
+        np_discounts_tab = build_np_discounts_tab(valid_df, new_product_skus)
+        missing_month_ranges = compute_missing_month_ranges(division_tab)
 
     output = {
         "meta": {
@@ -289,19 +308,23 @@ def main():
         "counter_creation_dates": counter_creation_dates,
     }
 
-    config.OUTPUT_DIR.mkdir(exist_ok=True)
-    report_json_str = json.dumps(output, indent=2)
-    with open(config.REPORT_JSON_PATH, "w", encoding="utf-8") as f:
-        f.write(report_json_str)
-    embed_data_in_dashboard(report_json_str)
+    with stage("Writing output/report_data.json and embedding it into dashboard.html"):
+        config.OUTPUT_DIR.mkdir(exist_ok=True)
+        report_json_str = json.dumps(output, indent=2)
+        with open(config.REPORT_JSON_PATH, "w", encoding="utf-8") as f:
+            f.write(report_json_str)
+        embed_data_in_dashboard(report_json_str)
+        dashboard_size_mb = DASHBOARD_HTML_PATH.stat().st_size / 1_000_000 if DASHBOARD_HTML_PATH.exists() else 0
 
+    total_elapsed = time.perf_counter() - run_start
+    print(f"\nDone in {total_elapsed:.1f}s total.")
     print(f"Wrote {config.REPORT_JSON_PATH}")
-    print(f"Embedded data into {DASHBOARD_HTML_PATH.name} -- it now works opened directly (file://), no server needed.")
+    print(f"Embedded data into {DASHBOARD_HTML_PATH.name} ({dashboard_size_mb:.1f} MB) -- it now works opened directly (file://), no server needed.")
     print(f"  rows: {output['meta']['row_counts']}")
-    print(f"  counter_tab records: {len(counter_tab)}")
-    print(f"  division_tab records: {len(division_tab)}")
-    print(f"  np_discounts_tab records: {len(np_discounts_tab)} (from {len(new_product_skus)} new-product SKUs)")
-    print(f"  known counter creation dates: {len(counter_creation_dates)}")
+    print(f"  counter_tab records: {len(counter_tab):,}")
+    print(f"  division_tab records: {len(division_tab):,}")
+    print(f"  np_discounts_tab records: {len(np_discounts_tab):,} (from {len(new_product_skus)} new-product SKUs)")
+    print(f"  known counter creation dates: {len(counter_creation_dates):,}")
 
 
 if __name__ == "__main__":
