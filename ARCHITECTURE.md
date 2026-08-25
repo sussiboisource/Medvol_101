@@ -23,12 +23,12 @@ since both are always generated fresh from the layers below them.
 | File | Status | What it is |
 |------|--------|------------|
 | `SCHEMA.md` | ✅ exists | Data dictionary: every column across all raw files, what it means, and the confirmed product hierarchy (Vertical → Division → Brand). Read this before writing any logic that touches a column. |
-| `order_lines_sample.csv` | ✅ exists | 98-row sample of order-line data, for building/testing against before the full 600MB export arrives. Never edited after creation. |
-| `Order Details <Mon>'<YY> to <Mon>'<YY>.xlsx` (real filenames, kept as-is) | ⏳ planned | Real order-line data, **as actual .xlsx exports** from the source system (not clean CSVs — same schema as the sample once read in). Periods are irregular: mostly quarterly, but some single months, and at least one span covering 10 months. See "File-period manifest" below for how these get tracked. |
-| `file_periods.csv` | ⏳ planned | The manifest: `filename → period_start, period_end`. Since the real filenames aren't consistently parseable (irregular spans, human-written), each new file's date range is confirmed by the user in conversation once, then recorded here — the pipeline reads this manifest instead of trying to regex-parse filenames. |
-| `item_brand_mapping_sample.csv` | ✅ exists | 8-row sample of the Item_Code → Brand/Franchise/Vertical/Division mapping. The main order export has no Brand column, so this is required for brand-level reporting. |
-| `item_brand_mapping.csv` | ⏳ planned | Full item→brand list, replacing the sample once the user provides it. |
-| `counter_creation_dates.csv` | ⏳ planned | Doctor_Code → creation date. Drives the New/Old counter split on the Counter tab. Until this exists, every counter is treated as "Old". |
+| `1. Order Details Apr'23 to June'23.xlsx`, `2. ... July'23 to Sept'23.xlsx` | ✅ exist (100 real rows each) | Real order-line data, actual `.xlsx` exports. |
+| `3.` through `10. Order Details ...xlsx` | ⏳ placeholders (header row only) | Same real filenames, waiting on real rows. Periods auto-parse correctly from the filenames (verified), including the irregular 10-month span (`7.`) and the numbered prefixes. |
+| `file_periods.csv` | ✅ exists (empty) | Manual override/addition for any filename the auto-parser can't handle. Not needed so far — every real filename has parsed cleanly. |
+| `item_brand_mapping.csv` | ✅ exists (226 rows) | **Repurposed**: this is the *new-products list*, not a general brand map — see "Three tabs" below. Powers Tab 3 only. |
+| `brand_master.csv` | ⏳ placeholder (header row only, `SKU_ID,BRAND_ID`) | The comprehensive old+new brand lookup for Tab 2's Brand join. User has this data (~3,000+ rows, several duplicated division sheets) but it's too large/risky to hand-transcribe from chat — waiting on the real file being placed here directly. |
+| `New Medvol customers from 1st April 2025.csv` | ✅ exists (108 real rows) | Counter registration log — `Allocated_CounterCode` + `Request_CreatedDate` give each new counter's identity and birth date. Powers Tab 1's New/Old filter. Presence in this file = New (as of its creation date); absence = Old by default. A future comprehensive counter master file (old+new) may extend this later, same fallback pattern as the brand files. |
 
 ### `scripts/` — code, no data lives here
 
@@ -51,19 +51,26 @@ since both are always generated fresh from the layers below them.
 | `ARCHITECTURE.md` | ✅ exists | This file. |
 | `dashboard.html` | ⏳ planned | The static two-tab report (Counter tab, Division Trend tab). Reads only `output/report_data.json`. Publishable as a link, viewable without running any Python. |
 
-## The two tabs this all serves
+## The three tabs this all serves
 
 1. **Counter tab** — sales value bucketed into discount ranges. Selection: **New / Old counter
-   checkboxes** (multi-selectable — check one or both; a 3rd selection is planned for later but
-   not yet defined). Results then grouped by **SKU or Brand** (user's choice). Two independent
-   discount-bucket filters (DiscountOnPTR-only vs. combined Total Discount) as before.
+   checkboxes** (check one or both). Results grouped by **SKU or Brand**. Two independent
+   discount-bucket filters (DiscountOnPTR-only vs. combined Total Discount).
 
-   **Resolved**: the dataset is static for now — no live upload pipeline, no in-browser prompt.
-   Whenever a new file (data or cutoff-date-relevant) is added, the user tells the assistant
-   directly in conversation what it means, and the manifest/config gets updated by hand at that
-   point. Every counter is "Old" for now regardless, since there's no creation-date file yet.
+   **New/Old resolved**: a counter is "New" if its `Doctor_Code` appears in
+   `New Medvol customers from 1st April 2025.csv` with a `Request_CreatedDate` on/after a
+   **cutoff date the viewer picks live in the dashboard** (a date-picker control, not a build-time
+   constant — matches the earlier "date is decided by user" requirement). Absent from that file =
+   "Old" by default. Since the cutoff is chosen live, `output/report_data.json` needs each
+   counter's raw creation date available to the browser, not a pre-computed New/Old flag.
+
 2. **Division Trend tab** — Medvol % and Net Sales % (see `data/SCHEMA.md` for the formulas) over
-   time (Apr 2023–May 2026), drillable at Division / Brand / SKU level.
+   time (Apr 2023–May 2026), drillable at Division / Brand / SKU level. The Brand join uses
+   `brand_master.csv` (comprehensive old+new SKU→Brand), not `item_brand_mapping.csv`.
+
+3. **NP Discounts tab (new)** — discount dispersion (same 9 buckets as Tab 1) for **new products
+   only** — "new" meaning present in `item_brand_mapping.csv`, which is a new-products list, not
+   a general catalog. Analyzed at SKU level.
 
 ## Known risks / edge cases to design around
 

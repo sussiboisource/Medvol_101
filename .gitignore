@@ -8,6 +8,10 @@ data/6*.xlsx
 data/7*.xlsx
 data/8*.xlsx
 data/9*.xlsx
+data/*.xlsb
+
+# Counter registration log - contains phone numbers, GST numbers, drug license numbers
+data/New Medvol customers*.csv
 
 # Generated aggregate output - also real sales figures, derived from the above
 output/report_data.json

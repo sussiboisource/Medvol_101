@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 import pandas as pd
 
 import config
+import db
 
 DASHBOARD_HTML_PATH = config.PROJECT_ROOT / "dashboard.html"
 REPORT_DATA_SCRIPT_RE = re.compile(
@@ -35,7 +36,6 @@ def embed_data_in_dashboard(report_json_str):
               "over HTTP (output/report_data.json is current).")
         return
     DASHBOARD_HTML_PATH.write_text(new_html, encoding="utf-8")
-import db
 
 
 def to_numeric(series, fill_value=None):
@@ -105,8 +105,14 @@ def add_derived_columns(df):
 
 
 def build_counter_tab(valid_df):
+    """Grain: Doctor_Code x SKU x discount bucket. Counter_Age is NOT pre-computed here --
+    the viewer picks a New/Old cutoff date live in the dashboard, so the raw Doctor_Code (and
+    the separately-shipped counter_creation_dates lookup) travel together and the browser does
+    the classification at render time."""
     records = []
-    group_cols = ["Counter_Age", config.SKU_ID_COLUMN, "Item_Description", "Brand", "Division_Name"]
+    group_cols = [
+        config.COUNTER_ID_COLUMN, config.SKU_ID_COLUMN, "Item_Description", "Brand", "Division_Name",
+    ]
 
     for bucket_col, discount_type in (("_bucket_ptr_only", "ptr_only"), ("_bucket_total", "total")):
         grouped = (
@@ -120,7 +126,39 @@ def build_counter_tab(valid_df):
 
     return [
         {
-            "counter_age": r["Counter_Age"],
+            "doctor_code": r[config.COUNTER_ID_COLUMN],
+            "item_code": r[config.SKU_ID_COLUMN],
+            "item_description": r["Item_Description"],
+            "brand": r["Brand"],
+            "division": r["Division_Name"],
+            "discount_type": r["discount_type"],
+            "bucket": str(r["bucket"]),
+            "amount": round(float(r["amount"]), 2),
+            "order_lines": int(r["order_lines"]),
+        }
+        for r in records
+    ]
+
+
+def build_np_discounts_tab(valid_df, new_product_skus):
+    """Tab 3: same 9 discount buckets as Tab 1, but only for SKUs in the new-products list
+    (item_brand_mapping.csv), at SKU level."""
+    df = valid_df[valid_df[config.SKU_ID_COLUMN].isin(new_product_skus)]
+    records = []
+    group_cols = [config.SKU_ID_COLUMN, "Item_Description", "Brand", "Division_Name"]
+
+    for bucket_col, discount_type in (("_bucket_ptr_only", "ptr_only"), ("_bucket_total", "total")):
+        grouped = (
+            df.groupby(group_cols + [bucket_col], observed=True)["_amount"]
+            .agg(amount="sum", order_lines="count")
+            .reset_index()
+            .rename(columns={bucket_col: "bucket"})
+        )
+        grouped["discount_type"] = discount_type
+        records.extend(grouped.to_dict(orient="records"))
+
+    return [
+        {
             "item_code": r[config.SKU_ID_COLUMN],
             "item_description": r["Item_Description"],
             "brand": r["Brand"],
@@ -166,14 +204,37 @@ def build_division_tab(valid_df):
     ]
 
 
+def compute_missing_month_ranges(division_tab):
+    """Which months in the tab's intended window (config.TREND_START_MONTH..TREND_END_MONTH)
+    have zero data, collapsed into contiguous ranges for a compact UI note."""
+    full_range = pd.period_range(config.TREND_START_MONTH, config.TREND_END_MONTH, freq="M")
+    months_with_data = {r["month"] for r in division_tab}
+
+    missing = [str(p) for p in full_range if str(p) not in months_with_data]
+    if not missing:
+        return []
+
+    ranges = []
+    start = prev = missing[0]
+    for month in missing[1:]:
+        if pd.Period(month, freq="M") == pd.Period(prev, freq="M") + 1:
+            prev = month
+            continue
+        ranges.append((start, prev))
+        start = prev = month
+    ranges.append((start, prev))
+
+    return [start if start == end else f"{start} to {end}" for start, end in ranges]
+
+
 def main():
     orders_df, load_meta = db.load_order_lines()
-    brand_df, brand_meta = db.load_brand_mapping()
-    counter_dates_df, counter_meta = db.load_counter_creation_dates()
+    new_products_df, new_products_meta = db.load_new_products()
+    brand_master_df, brand_master_meta = db.load_brand_master()
+    new_counters_df, new_counters_meta = db.load_new_counters()
 
     orders_df = add_derived_columns(orders_df)
-    orders_df = db.join_brand(orders_df, brand_df)
-    orders_df = db.join_counter_age(orders_df, counter_dates_df, config.COUNTER_AGE_CUTOFF_DATE)
+    orders_df = db.join_brand_master(orders_df, brand_master_df)
 
     status_counts = orders_df["_status_class"].value_counts().to_dict()
     unclassified_statuses = sorted(
@@ -185,8 +246,13 @@ def main():
     nan_invoice_rows = int(valid_df["_invoice_amount"].isna().sum())
     unmapped_brand_rows = int((valid_df["Brand"] == config.UNMAPPED_BRAND_LABEL).sum())
 
+    new_product_skus = db.new_product_sku_set(new_products_df)
+    counter_creation_dates = db.counter_creation_date_lookup(new_counters_df)
+
     counter_tab = build_counter_tab(valid_df)
     division_tab = build_division_tab(valid_df)
+    np_discounts_tab = build_np_discounts_tab(valid_df, new_product_skus)
+    missing_month_ranges = compute_missing_month_ranges(division_tab)
 
     output = {
         "meta": {
@@ -206,13 +272,21 @@ def main():
             "duplicate_rows_dropped": load_meta["duplicate_rows_dropped"],
             "duplicate_rows_conflicting": load_meta["duplicate_rows_conflicting"],
             "conflicting_keys_sample": load_meta["conflicting_keys_sample"],
-            "brand_mapping_files": brand_meta["brand_mapping_files"],
-            "duplicate_brand_codes": brand_meta["duplicate_brand_codes"],
-            "counter_creation_dates_file_present": counter_meta["counter_creation_dates_file_present"],
-            "duplicate_counter_codes": counter_meta["duplicate_counter_codes"],
+            "new_products_files": new_products_meta["new_products_files"],
+            "duplicate_new_product_codes": new_products_meta["duplicate_new_product_codes"],
+            "new_product_sku_count": len(new_product_skus),
+            "brand_master_file_present": brand_master_meta["brand_master_file_present"],
+            "duplicate_brand_master_codes": brand_master_meta["duplicate_brand_master_codes"],
+            "new_counters_file_present": new_counters_meta["new_counters_file_present"],
+            "duplicate_counter_codes": new_counters_meta["duplicate_counter_codes"],
+            "known_counter_creation_dates": len(counter_creation_dates),
+            "trend_window": {"start": config.TREND_START_MONTH, "end": config.TREND_END_MONTH},
+            "missing_month_ranges": missing_month_ranges,
         },
         "counter_tab": counter_tab,
         "division_tab": division_tab,
+        "np_discounts_tab": np_discounts_tab,
+        "counter_creation_dates": counter_creation_dates,
     }
 
     config.OUTPUT_DIR.mkdir(exist_ok=True)
@@ -226,6 +300,8 @@ def main():
     print(f"  rows: {output['meta']['row_counts']}")
     print(f"  counter_tab records: {len(counter_tab)}")
     print(f"  division_tab records: {len(division_tab)}")
+    print(f"  np_discounts_tab records: {len(np_discounts_tab)} (from {len(new_product_skus)} new-product SKUs)")
+    print(f"  known counter creation dates: {len(counter_creation_dates)}")
 
 
 if __name__ == "__main__":

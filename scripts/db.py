@@ -1,9 +1,11 @@
 """Data-access layer. The only module that reads C:/.../data/ directly.
 
 Discovers raw order-line files (.csv / .xlsx), loads and stacks them, dedupes rows that
-appear in more than one overlapping file, and joins in the two reference files (item->brand
-mapping, counter creation dates). Everything else in the project should call functions here
-instead of touching data/ itself.
+appear in more than one overlapping file, and loads the three reference files: the
+new-products list (item_brand_mapping.csv, powers Tab 3), the brand master
+(brand_master.csv, powers Tab 2's Brand join), and the new-counters log
+(New Medvol customers ....csv, powers Tab 1's New/Old split). Everything else in the
+project should call functions here instead of touching data/ itself.
 """
 
 import re
@@ -22,7 +24,7 @@ MONTH_NUMBERS = {
 }
 
 FILENAME_PERIOD_RE = re.compile(
-    r"([A-Za-z]+)'(\d{2})(?:\s*to\s*([A-Za-z]+)'(\d{2}))?", re.IGNORECASE
+    r"([A-Za-z]+)'(\d{2})(?:\s*(?:to|-)\s*([A-Za-z]+)'(\d{2}))?", re.IGNORECASE
 )
 
 
@@ -71,7 +73,7 @@ def load_file_periods_manifest():
 
 def _is_reference_file(filename):
     lower = filename.lower()
-    return any(lower.startswith(prefix) for prefix in config.NON_ORDER_FILE_PREFIXES)
+    return any(lower.startswith(prefix.lower()) for prefix in config.NON_ORDER_FILE_PREFIXES)
 
 
 def discover_order_files():
@@ -85,7 +87,7 @@ def discover_order_files():
     skipped = []
 
     for path in sorted(config.DATA_DIR.iterdir()):
-        if path.suffix.lower() not in (".csv", ".xlsx"):
+        if path.suffix.lower() not in (".csv", ".xlsx", ".xlsb"):
             continue
         if _is_reference_file(path.name):
             continue
@@ -119,8 +121,11 @@ def discover_order_files():
 
 
 def _read_one_file(path):
-    if path.suffix.lower() == ".xlsx":
+    suffix = path.suffix.lower()
+    if suffix == ".xlsx":
         return pd.read_excel(path, dtype=str)
+    if suffix == ".xlsb":
+        return pd.read_excel(path, dtype=str, engine="pyxlsb")
 
     last_error = None
     for encoding in config.CSV_ENCODING_FALLBACKS:
@@ -183,88 +188,111 @@ def load_order_lines():
     return deduped, meta
 
 
-def load_brand_mapping():
-    """Concatenates every item_brand_mapping*.csv/.xlsx in data/. Returns (DataFrame, meta)."""
+def load_new_products():
+    """Reads item_brand_mapping.csv -- the NEW-PRODUCTS list (powers Tab 3), not a general
+    brand map. Returns (DataFrame, meta)."""
     paths = sorted(
-        p for p in config.DATA_DIR.glob("item_brand_mapping*")
+        p for p in config.DATA_DIR.glob(f"{config.NEW_PRODUCTS_FILE_PREFIX}*")
         if p.suffix.lower() in (".csv", ".xlsx")
     ) if config.DATA_DIR.exists() else []
 
     if not paths:
         return pd.DataFrame(columns=[
-            config.BRAND_MAPPING_SKU_COLUMN, config.BRAND_MAPPING_BRAND_COLUMN,
-            config.BRAND_MAPPING_DIVISION_COLUMN, config.BRAND_MAPPING_VERTICAL_COLUMN,
-        ]), {"brand_mapping_files": [], "duplicate_brand_codes": 0}
+            config.NEW_PRODUCTS_SKU_COLUMN, config.NEW_PRODUCTS_BRAND_COLUMN,
+            config.NEW_PRODUCTS_DIVISION_COLUMN, config.NEW_PRODUCTS_VERTICAL_COLUMN,
+        ]), {"new_products_files": [], "duplicate_new_product_codes": 0}
 
     frames = [_read_one_file(p) for p in paths]
     combined = pd.concat(frames, ignore_index=True)
 
-    dupe_mask = combined.duplicated(subset=[config.BRAND_MAPPING_SKU_COLUMN], keep="first")
+    dupe_mask = combined.duplicated(subset=[config.NEW_PRODUCTS_SKU_COLUMN], keep="first")
     duplicate_count = int(dupe_mask.sum())
     if duplicate_count:
         warnings.warn(
-            f"{duplicate_count} duplicate '{config.BRAND_MAPPING_SKU_COLUMN}' entries in brand "
-            f"mapping file(s) -- keeping first occurrence of each, dropping the rest."
+            f"{duplicate_count} duplicate '{config.NEW_PRODUCTS_SKU_COLUMN}' entries in the "
+            f"new-products file(s) -- keeping first occurrence of each, dropping the rest."
         )
     deduped = combined[~dupe_mask]
 
     return deduped, {
-        "brand_mapping_files": [p.name for p in paths],
-        "duplicate_brand_codes": duplicate_count,
+        "new_products_files": [p.name for p in paths],
+        "duplicate_new_product_codes": duplicate_count,
     }
 
 
-def load_counter_creation_dates():
-    """Returns (DataFrame or None, meta). None means the file doesn't exist yet -- every
-    counter should be treated as 'Old' by the caller in that case."""
-    if not config.COUNTER_CREATION_DATES_FILE.exists():
-        return None, {"counter_creation_dates_file_present": False, "duplicate_counter_codes": 0}
+def load_brand_master():
+    """Reads brand_master.csv -- the comprehensive old+new SKU->Brand lookup for Tab 2's Brand
+    join. Returns (DataFrame, meta). Empty DataFrame if the file doesn't exist yet or is a
+    header-only placeholder."""
+    if not config.BRAND_MASTER_FILE.exists():
+        return pd.DataFrame(columns=[config.BRAND_MASTER_SKU_COLUMN, config.BRAND_MASTER_BRAND_COLUMN]), {
+            "brand_master_file_present": False, "duplicate_brand_master_codes": 0,
+        }
 
-    df = _read_one_file(config.COUNTER_CREATION_DATES_FILE)
-    dupe_mask = df.duplicated(subset=[config.COUNTER_ID_COLUMN], keep="first")
+    df = _read_one_file(config.BRAND_MASTER_FILE)
+    dupe_mask = df.duplicated(subset=[config.BRAND_MASTER_SKU_COLUMN], keep="first")
     duplicate_count = int(dupe_mask.sum())
     if duplicate_count:
         warnings.warn(
-            f"{duplicate_count} duplicate '{config.COUNTER_ID_COLUMN}' entries in "
-            f"counter_creation_dates.csv -- keeping first occurrence of each."
+            f"{duplicate_count} duplicate '{config.BRAND_MASTER_SKU_COLUMN}' entries in "
+            f"brand_master.csv -- keeping first occurrence of each."
         )
     return df[~dupe_mask], {
-        "counter_creation_dates_file_present": True,
+        "brand_master_file_present": True,
+        "duplicate_brand_master_codes": duplicate_count,
+    }
+
+
+def load_new_counters():
+    """Reads the counter registration log (Allocated_CounterCode + Request_CreatedDate).
+    Returns (DataFrame or None, meta). None means the file doesn't exist yet -- every counter
+    is 'Old' by default in that case, with no live cutoff-date control shown."""
+    if not config.NEW_COUNTERS_FILE.exists():
+        return None, {"new_counters_file_present": False, "duplicate_counter_codes": 0}
+
+    df = _read_one_file(config.NEW_COUNTERS_FILE)
+    dupe_mask = df.duplicated(subset=[config.NEW_COUNTERS_ID_COLUMN], keep="first")
+    duplicate_count = int(dupe_mask.sum())
+    if duplicate_count:
+        warnings.warn(
+            f"{duplicate_count} duplicate '{config.NEW_COUNTERS_ID_COLUMN}' entries in the new "
+            f"counters file -- keeping first occurrence of each."
+        )
+    return df[~dupe_mask], {
+        "new_counters_file_present": True,
         "duplicate_counter_codes": duplicate_count,
     }
 
 
-def join_brand(orders_df, brand_df):
-    """Adds Brand/Division_FromBrandFile/Vertical_FromBrandFile columns. Unmatched Item_Codes
-    get config.UNMAPPED_BRAND_LABEL, never dropped or silently left blank."""
-    if brand_df.empty:
-        result = orders_df.copy()
+def join_brand_master(orders_df, brand_master_df):
+    """Adds a Brand column from brand_master.csv (Tab 2's join). Unmatched Item_Codes get
+    config.UNMAPPED_BRAND_LABEL, never dropped or silently left blank."""
+    result = orders_df.copy()
+    if brand_master_df.empty:
         result["Brand"] = config.UNMAPPED_BRAND_LABEL
         return result
 
-    lookup = brand_df.set_index(config.BRAND_MAPPING_SKU_COLUMN)[config.BRAND_MAPPING_BRAND_COLUMN]
-    result = orders_df.copy()
+    lookup = brand_master_df.set_index(config.BRAND_MASTER_SKU_COLUMN)[config.BRAND_MASTER_BRAND_COLUMN]
     result["Brand"] = result[config.SKU_ID_COLUMN].map(lookup).fillna(config.UNMAPPED_BRAND_LABEL)
     return result
 
 
-def join_counter_age(orders_df, counter_dates_df, cutoff_date):
-    """Adds Counter_Age column: 'Old' / 'New' / config.UNKNOWN_COUNTER_AGE_LABEL. If
-    counter_dates_df is None (no creation-date file yet) or cutoff_date is None, every
-    counter is 'Old' -- the current, confirmed default."""
-    result = orders_df.copy()
-    if counter_dates_df is None or cutoff_date is None:
-        result["Counter_Age"] = "Old"
-        return result
+def new_product_sku_set(new_products_df):
+    """The set of Item_Codes considered 'new products' for Tab 3, from item_brand_mapping.csv."""
+    if new_products_df.empty:
+        return set()
+    return set(new_products_df[config.NEW_PRODUCTS_SKU_COLUMN].dropna())
 
-    date_col = [c for c in counter_dates_df.columns if c != config.COUNTER_ID_COLUMN][0]
-    lookup = counter_dates_df.set_index(config.COUNTER_ID_COLUMN)[date_col]
-    creation_dates = result[config.COUNTER_ID_COLUMN].map(lookup)
 
-    result["Counter_Age"] = config.UNKNOWN_COUNTER_AGE_LABEL
-    known = creation_dates.notna()
-    is_new = known & (pd.to_datetime(creation_dates) >= pd.to_datetime(cutoff_date))
-    is_old = known & ~is_new
-    result.loc[is_new, "Counter_Age"] = "New"
-    result.loc[is_old, "Counter_Age"] = "Old"
-    return result
+def counter_creation_date_lookup(new_counters_df):
+    """Returns {Doctor_Code: ISO-date-string} for every counter in the new-counters file --
+    shipped into the JSON so the browser can classify New/Old live against any cutoff date."""
+    if new_counters_df is None or new_counters_df.empty:
+        return {}
+    dates = pd.to_datetime(new_counters_df[config.NEW_COUNTERS_DATE_COLUMN], errors="coerce")
+    codes = new_counters_df[config.NEW_COUNTERS_ID_COLUMN]
+    lookup = {}
+    for code, date in zip(codes, dates):
+        if pd.notna(date) and pd.notna(code):
+            lookup[code] = date.strftime("%Y-%m-%d")
+    return lookup
