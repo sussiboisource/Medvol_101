@@ -12,6 +12,7 @@ Usage: python inspect_duplicates.py [--sample-size 15] [--seed 42]
 
 import argparse
 import random
+import time
 
 import pandas as pd
 
@@ -36,8 +37,10 @@ def main():
     if skipped:
         print(f"NOTE: {len(skipped)} file(s) skipped by discovery: {skipped}")
 
+    total_files = len(file_infos)
     frames = []
-    for info in file_infos:
+    for i, info in enumerate(file_infos, start=1):
+        print(f"  {db.progress_bar(i - 1, total_files)} loading {info['filename']} ...", flush=True)
         try:
             raw = db._read_one_file(info["path"])
         except Exception as exc:
@@ -46,6 +49,7 @@ def main():
         raw = db.strip_string_columns(raw)
         raw["_source_file"] = info["filename"]
         frames.append(raw)
+    print(f"  {db.progress_bar(total_files, total_files)} loaded {len(frames)}/{total_files} file(s)", flush=True)
 
     if not frames:
         print("No files could be loaded.")
@@ -55,15 +59,26 @@ def main():
     dup_key = [config.SKU_ID_COLUMN, "Order_Number"]
     value_check_cols = ["Amount", "InvoiceAmount", "Quantity", "DiscountOnPTR"]
 
+    print(f"\nGrouping {len(combined):,} rows by (SKU, Order_Number) ...", flush=True)
+    t0 = time.perf_counter()
+    grouped = combined.groupby(dup_key)
+    total_groups = grouped.ngroups
+    print(f"  {total_groups:,} distinct (SKU, Order_Number) key(s) -- checking each for cross-file conflicts ...", flush=True)
+
     conflicting_groups = []
-    for key, group in combined.groupby(dup_key):
+    report_every = max(2000, total_groups // 100)
+    for i, (key, group) in enumerate(grouped, start=1):
+        if i % report_every == 0 or i == total_groups:
+            print(f"  {db.progress_bar(i, total_groups)} checking key {i:,}/{total_groups:,} "
+                  f"({len(conflicting_groups):,} conflict(s) found so far)", flush=True)
         if len(group) <= 1 or group["_source_file"].nunique() <= 1:
             continue
         distinct_value_rows = group[value_check_cols].drop_duplicates()
         if len(distinct_value_rows) > 1:
             conflicting_groups.append((key, group))
 
-    print(f"Total conflicting (Item_Code, Order_Number) keys found: {len(conflicting_groups):,}\n")
+    print(f"  done in {time.perf_counter() - t0:.1f}s", flush=True)
+    print(f"\nTotal conflicting (Item_Code, Order_Number) keys found: {len(conflicting_groups):,}\n")
     if not conflicting_groups:
         return
 

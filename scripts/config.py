@@ -13,7 +13,7 @@ FILE_PERIODS_MANIFEST = DATA_DIR / "file_periods.csv"
 # Counter registration/creation-date log. Presence of a Doctor_Code here = "New" counter (as of
 # its Request_CreatedDate); absence = "Old" by default. A future comprehensive counter master
 # (old+new) may extend this later.
-NEW_COUNTERS_FILE = DATA_DIR / "New Medvol customers from 1st April 2025.csv"
+NEW_COUNTERS_FILE = DATA_DIR / "New Medvol customers from 1st April 2025.xlsx"
 NEW_COUNTERS_ID_COLUMN = "Allocated_CounterCode"
 NEW_COUNTERS_DATE_COLUMN = "Request_CreatedDate"
 

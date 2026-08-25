@@ -11,7 +11,7 @@ data/9*.xlsx
 data/*.xlsb
 
 # Counter registration log - contains phone numbers, GST numbers, drug license numbers
-data/New Medvol customers*.csv
+data/New Medvol customers*
 
 # Brand master - real SKU->Brand business data, not for the repo
 data/brand_master.csv
