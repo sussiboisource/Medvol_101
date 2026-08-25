@@ -107,8 +107,9 @@ def _is_reference_file(filename):
 
 
 def discover_order_files():
-    """Every .csv/.xlsx in data/ that isn't a known reference file. Returns list of dicts:
-    {path, filename, period_start, period_end, period_source}."""
+    """Every .csv/.xlsx/.xlsb in data/ that isn't a known reference file. Returns
+    (found, skipped): found is a list of dicts {path, filename, period_start, period_end,
+    period_source}; skipped is a list of filenames with no parseable period."""
     if not config.DATA_DIR.exists():
         return []
 

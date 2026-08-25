@@ -74,9 +74,10 @@ UNMAPPED_BRAND_LABEL = "Unmapped"
 COUNTER_AGE_CUTOFF_DATE = None
 
 # Division Trend tab's intended time window. Informational only -- data outside this range
-# is not clipped, just what the tab is meant to cover.
+# is not clipped, just what the tab is meant to cover. FY27 is being treated as running through
+# July 2026 for now (per user, matches the latest real file's coverage), not the full Mar 2027.
 TREND_START_MONTH = "2023-04"
-TREND_END_MONTH = "2026-05"
+TREND_END_MONTH = "2026-07"
 
 # Encodings to try in order when reading a raw CSV (xlsx doesn't need this).
 CSV_ENCODING_FALLBACKS = ("utf-8", "cp1252", "latin-1")

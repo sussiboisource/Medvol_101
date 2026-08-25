@@ -190,7 +190,20 @@ def build_np_discounts_tab(valid_df, new_product_skus):
 
 
 def build_division_tab(valid_df):
-    df = valid_df.copy()
+    """Rows with no parseable transaction date (neither OrdPlaced_Date nor
+    Order_InitiatedDate usable) can't be placed on the timeline -- excluded here rather than
+    leaking a broken 'NaT' month value into the tab (that silently corrupted the FY/month
+    grouping and crashed downstream tools expecting 'YYYY-MM')."""
+    df = valid_df[valid_df["_txn_date"].notna()].copy()
+    undated_rows = int(valid_df["_txn_date"].isna().sum())
+    if undated_rows:
+        db.report_issue(
+            "warning",
+            f"{undated_rows:,} valid row(s) have no parseable transaction date (both "
+            f"OrdPlaced_Date and Order_InitiatedDate are blank/unusable) -- excluded from the "
+            f"Division Trend tab only (still counted in the other two tabs)."
+        )
+
     df["_month"] = df["_txn_date"].dt.to_period("M").astype(str)
 
     group_cols = ["_month", config.SKU_ID_COLUMN, "Item_Description", "Brand", "Division_Name"]
@@ -262,10 +275,10 @@ def main():
         orders_df = db.join_counter_age(orders_df, new_counters_df, config.COUNTER_AGE_CUTOFF_DATE)
 
         status_counts = orders_df["_status_class"].value_counts().to_dict()
-        unclassified_status_counts = (
-            orders_df.loc[orders_df["_status_class"] == "Unclassified", "Order_Status"]
-            .value_counts().to_dict()
-        )
+        unclassified_status_display = orders_df.loc[
+            orders_df["_status_class"] == "Unclassified", "Order_Status"
+        ].apply(lambda s: s if isinstance(s, str) and s.strip() else "(blank)")
+        unclassified_status_counts = unclassified_status_display.value_counts(dropna=False).to_dict()
         unclassified_statuses = sorted(unclassified_status_counts.keys())
         valid_df = orders_df[orders_df["_status_class"] == "Valid"].copy()
 
@@ -273,6 +286,24 @@ def main():
         nan_invoice_rows = int(valid_df["_invoice_amount"].isna().sum())
         unmapped_brand_rows = int((valid_df["Brand"] == config.UNMAPPED_BRAND_LABEL).sum())
         new_counter_rows = int((valid_df["Counter_Age"] == "New").sum())
+
+        out_of_range_ptr_rows = int(valid_df["_bucket_ptr_only"].isna().sum())
+        out_of_range_total_rows = int(valid_df["_bucket_total"].isna().sum())
+        if out_of_range_ptr_rows:
+            db.report_issue(
+                "warning",
+                f"{out_of_range_ptr_rows:,} valid row(s) have a DiscountOnPTR outside 0-100% "
+                f"(negative, or the 100.0001% cutoff, likely a data-entry error) -- excluded from "
+                f"the Discount Dispersion/NP Discounts tabs' 'DiscountOnPTR only' bucket totals "
+                f"(still counted in the Division Trend tab, which doesn't bucket)."
+            )
+        if out_of_range_total_rows:
+            db.report_issue(
+                "warning",
+                f"{out_of_range_total_rows:,} valid row(s) have a compounded Total Discount "
+                f"outside 0-100% -- excluded from the Discount Dispersion/NP Discounts tabs' "
+                f"'Total discount' bucket totals (still counted in the Division Trend tab)."
+            )
 
         new_product_skus = db.new_product_sku_set(new_products_df)
 

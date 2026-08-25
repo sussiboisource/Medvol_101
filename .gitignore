@@ -15,6 +15,7 @@ data/New Medvol customers*.csv
 
 # Generated aggregate output - also real sales figures, derived from the above
 output/report_data.json
+output/verification_report.txt
 
 # Python cache
 scripts/__pycache__/

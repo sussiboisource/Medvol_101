@@ -76,11 +76,18 @@ in the same order (e.g. `ORD3112230454` appears 5 times, once per item). The rea
    to whoever's territory the order falls under. The brand/SKU level for the Division Trend tab
    should come from `Division_Name` (brand) and `Item_Description` (SKU) instead — not `L0`–`L3`.
 
-## Reference file: Item → Brand mapping
+## Reference files (superseding note)
 
 The main order-line export has **no usable Brand column** — `Division_Name`/`Cluster_Name` exist,
 but real brand-level granularity is missing, and `L0`–`L3` are not brand levels (see flag above).
-The user has a separate mapping file, sample saved at `data/item_brand_mapping_sample.csv`:
+Two separate reference files now cover this, confirmed by the user — **`item_brand_mapping.csv`
+is NOT a general brand map**, despite its name and the column shapes below; it's repurposed as
+the **new-products list** that powers the NP Discounts tab only (presence of a `Code` = "this SKU
+is a new product"). The actual old+new SKU→Brand lookup for the Division Trend tab's Brand
+drill-down is a separate file, `data/brand_master.csv` (`SKU_ID,BRAND_ID`, currently a
+header-only placeholder awaiting the real ~3,000+ row file).
+
+`item_brand_mapping.csv` columns (226 real rows currently):
 
 | Column | Meaning |
 |--------|---------|
@@ -89,11 +96,10 @@ The user has a separate mapping file, sample saved at `data/item_brand_mapping_s
 | `Vertical` | Top-level grouping (e.g. `Acute_1`, `Chronic`) |
 | `Division` | Same concept as order data's `Division_Name`, but not always an identical string (e.g. `Derma_B` here vs `Derma B` in order data) |
 | `Franchise` | Sub-brand grouping |
-| `Brand` | The actual brand name — this is what's missing from the main export |
+| `Brand` | Brand name — not used by the pipeline since this file only feeds the NP tab's SKU list, but kept in the file as-is |
 
-**Only 8 sample rows exist so far** — the full item→brand list is still pending from the user, so
-any brand-level testing right now is necessarily partial. Join key: `Item_Code` (orders) =
-`Code` (this file).
+Join key: `Item_Code` (orders) = `Code` (this file). See [ARCHITECTURE.md](../ARCHITECTURE.md)
+for how this and `brand_master.csv` are actually wired into the three dashboard tabs.
 
 ## Product hierarchy (confirmed by user)
 
@@ -149,11 +155,12 @@ For any date-based logic (monthly trend bucketing, resolving which of two duplic
 across overlapping files): use `OrdPlaced_Date`; if that's blank, fall back to
 `Order_InitiatedDate` (which is populated on every sample row, so this fallback always resolves).
 
-## Multi-file "database" behaviour
+## Multi-file "database" behaviour (implemented)
 
-Once monthly/quarterly files land (`orders_2023-12.csv`, `orders_2024-Q1.csv`, etc.), they all
-share this exact schema. They stay as separate files on disk — a data-access layer (planned as
-`scripts/db.py`, not yet written) will be the only code that reads `data/`, and will:
-- discover every `orders_*.csv` by filename pattern and load them into one in-memory table
-- load `counter_creation_dates.csv` when present and expose a join on `Doctor_Code`
-- hand that combined table to `build_report_data.py` — so raw files never merge on disk, only in memory, and nothing downstream needs to know how many files or which period they came from
+Real filenames follow the pattern `"N. Order Details <Mon>'<YY> to <Mon>'<YY>.xlsx"` (or `.xlsb`,
+or a single-month span with no "to"). `scripts/db.py` is the only code that reads `data/` — it
+auto-parses each file's period from its name via regex (`parse_period_from_filename`, with
+`file_periods.csv` as a manual override for anything the parser can't handle), reads every
+`.csv`/`.xlsx`/`.xlsb` in the folder, and stacks them into one in-memory table for
+`build_report_data.py`. Raw files never merge on disk, only in memory. See
+[ARCHITECTURE.md](../ARCHITECTURE.md) for the full file-by-file breakdown of `scripts/`.
