@@ -47,6 +47,25 @@ def strip_string_columns(df):
     return df
 
 
+EXCEL_DATE_ORIGIN = "1899-12-30"
+
+
+def parse_dates(series):
+    """Parses a date column that may contain either normal date strings (from .xlsx/.csv,
+    read via openpyxl -- date-formatted cells come back as real datetimes, stringified into
+    something pd.to_datetime already understands) OR raw Excel serial-number strings (from
+    .xlsb via pyxlsb, which does NOT auto-convert date-formatted cells like openpyxl does --
+    it hands back the underlying day-count number, e.g. "45673.5", which under dtype=str
+    becomes a plain numeric string pd.to_datetime can't recognize as a date at all). Without
+    this fallback, every date in every .xlsb file silently becomes unparseable."""
+    parsed = pd.to_datetime(series, errors="coerce")
+    unresolved = parsed.isna() & series.notna()
+    if unresolved.any():
+        serials = pd.to_numeric(series[unresolved], errors="coerce")
+        parsed.loc[unresolved] = pd.to_datetime(serials, unit="D", origin=EXCEL_DATE_ORIGIN, errors="coerce")
+    return parsed
+
+
 MONTH_NUMBERS = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5,
     "jun": 6, "june": 6, "jul": 7, "july": 7, "aug": 8,

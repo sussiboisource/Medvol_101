@@ -2,7 +2,7 @@
 date/dedup logic -- everything here is reimplemented separately, on purpose, so this actually
 catches bugs in that logic instead of just confirming it agrees with itself.
 
-Five checks, each independent of the others -- one crashing does NOT stop the rest, and
+Six checks, each independent of the others -- one crashing does NOT stop the rest, and
 whatever ran (plus the crash itself, if any) always gets written to
 output/verification_report.txt so there's a single, complete, pasteable file to hand back for
 diagnosis instead of copying partial/stale terminal scrollback:
@@ -16,6 +16,11 @@ diagnosis instead of copying partial/stale terminal scrollback:
      report) -- are there any months in the intended trend window not covered by any file, and
      do any files declare overlapping periods (informational -- expected for real re-exports,
      but worth seeing).
+  E. Header consistency: do all discovered order files agree on the columns the pipeline
+     actually reads (IMPORTANT_COLUMNS -- dates, discount math, status, join keys)? Part 0
+     already flags a file individually missing from the full 57-column expected list, but
+     that's one line inside a long per-file row; this is a focused, direct file-by-file
+     comparison on just the columns that matter for correctness.
   A. Row-level arithmetic sanity: for up to N random rows per raw file, does
      PTR * (1-DiscountOnPTR/100) * (1-Cash_Discount/100) * Quantity actually match Amount?
      (Skips rows where FixedPrice overrides that formula.) Independent of any pipeline code.
@@ -29,7 +34,7 @@ diagnosis instead of copying partial/stale terminal scrollback:
 
 A final SUMMARY block (counts only, backed by the detail in the parts above) prints at the end,
 so "what's actually wrong with data/ right now" is answerable in one glance instead of reading
-through four sections of detail.
+through five sections of detail.
 
 Usage: python verify_data.py [--sample-size 100] [--seed 42]
 Requires output/report_data.json to already exist (run build_report_data.py first).
@@ -52,6 +57,17 @@ import db
 VALID_STATUSES_NORMALIZED = {" ".join(s.split()).strip().lower() for s in config.VALID_ORDER_STATUSES}
 REPORT_LINES = []
 
+# The columns the pipeline actually reads -- dates, discount math, status classification,
+# join keys. Not the full 57-column EXPECTED_COLUMNS list (most of which, e.g. HQ or
+# Position_Code, are never touched by any logic) -- just the ones where a missing/renamed
+# column would silently break something.
+IMPORTANT_COLUMNS = [
+    "Order_Number", config.PRIMARY_DATE_COLUMN, config.FALLBACK_DATE_COLUMN,
+    config.SKU_ID_COLUMN, "Item_Description", "Division_Name", "Quantity",
+    "Amount", "InvoiceAmount", "Order_Status", "PTR", "DiscountOnPTR",
+    "Cash_Discount", "FixedPrice", config.COUNTER_ID_COLUMN,
+]
+
 # Tallied as each check runs, printed as one scannable block at the very end -- so "what's wrong
 # with data/ right now" has a single answer instead of requiring a read-through of every part.
 SUMMARY_COUNTS = {
@@ -59,6 +75,7 @@ SUMMARY_COUNTS = {
     "files_skipped_unparseable_name": 0,
     "files_with_column_issues": 0,
     "period_coverage_gap_months": 0,
+    "header_mismatch_files": 0,
     "arithmetic_mismatches": 0,
     "reconciliation_mismatches": 0,
     "build_time_errors": 0,
@@ -73,7 +90,7 @@ def log(message=""):
     REPORT_LINES.append(message)
 
 
-TOTAL_STAGES = 6
+TOTAL_STAGES = 7
 
 
 @contextmanager
@@ -251,6 +268,46 @@ def check_period_coverage():
             log(f"    '{a}'  <->  '{b}'   ({span})")
 
 
+def check_header_consistency():
+    """Part E: do all discovered order files agree on the columns the pipeline actually
+    reads (IMPORTANT_COLUMNS)? Opens every file fresh (independent of Part 0's own read) and
+    checks each one against the same fixed list, so the answer to "do all 15 files have
+    matching headers" is one direct table instead of something you'd have to piece together
+    from Part 0's per-file missing-column notes."""
+    log(f"\n{'='*70}\nPART E -- Header consistency across order files (important columns only)\n{'='*70}")
+    log(f"  Checking {len(IMPORTANT_COLUMNS)} column(s): {', '.join(IMPORTANT_COLUMNS)}")
+
+    file_infos, _ = db.discover_order_files()
+    if not file_infos:
+        log("  No order files discovered -- nothing to check.")
+        return
+
+    per_file_missing = {}
+    for info in file_infos:
+        try:
+            raw = db._read_one_file(info["path"])
+        except Exception as exc:
+            log(f"    {info['filename']:<55} FAILED to open -- {type(exc).__name__}: {exc}")
+            continue
+        per_file_missing[info["filename"]] = [c for c in IMPORTANT_COLUMNS if c not in raw.columns]
+
+    if not per_file_missing:
+        return
+
+    clean_count = sum(1 for missing in per_file_missing.values() if not missing)
+    log(f"\n  {clean_count}/{len(per_file_missing)} file(s) have all {len(IMPORTANT_COLUMNS)} "
+        f"important columns present with matching names.")
+
+    name_width = max(len(f) for f in per_file_missing)
+    for filename in sorted(per_file_missing):
+        missing = per_file_missing[filename]
+        if missing:
+            SUMMARY_COUNTS["header_mismatch_files"] += 1
+            log(f"    {filename:<{name_width}}  MISSING: {missing}")
+        else:
+            log(f"    {filename:<{name_width}}  OK")
+
+
 def load_all_raw_rows():
     """Loads every raw order file independently (file discovery/reading reused from db.py --
     that's I/O plumbing, not business logic -- but sanitization, dedup, classification, and
@@ -280,8 +337,11 @@ def load_all_raw_rows():
 
     combined = pd.concat(frames, ignore_index=True)
 
-    primary = pd.to_datetime(combined[config.PRIMARY_DATE_COLUMN], errors="coerce")
-    fallback = pd.to_datetime(combined[config.FALLBACK_DATE_COLUMN], errors="coerce")
+    # db.parse_dates handles the .xlsb-via-pyxlsb quirk (raw Excel serial numbers instead of
+    # real dates) -- this is I/O-level parsing, same category as file reading, not the
+    # business logic this module is meant to reimplement independently.
+    primary = db.parse_dates(combined[config.PRIMARY_DATE_COLUMN])
+    fallback = db.parse_dates(combined[config.FALLBACK_DATE_COLUMN])
     date = primary.fillna(fallback)
 
     # Built as one dict + a single pd.concat, not repeated combined["_x"] = ... assignments --
@@ -457,6 +517,7 @@ SUMMARY_LABELS = {
     "files_skipped_unparseable_name": "Files skipped -- unparseable filename (Part 0)",
     "files_with_column_issues": "Files with missing/unexpected columns (Part 0)",
     "period_coverage_gap_months": "Months with no file covering them (Part D)",
+    "header_mismatch_files": "Files missing an important column (Part E)",
     "arithmetic_mismatches": "Row arithmetic mismatches (Part A)",
     "reconciliation_mismatches": "SKU-level reconciliation mismatches (Part B)",
     "build_time_errors": "Build-time errors -- data likely missing (Part C)",
@@ -504,7 +565,10 @@ def main():
     with stage("PART D -- period coverage", 2):
         run_check("PART D", check_period_coverage)
 
-    with stage("Loading raw rows for Parts A/B", 3):
+    with stage("PART E -- header consistency", 3):
+        run_check("PART E", check_header_consistency)
+
+    with stage("Loading raw rows for Parts A/B", 4):
         try:
             df = load_all_raw_rows()
         except Exception:
@@ -512,19 +576,19 @@ def main():
             log(traceback.format_exc())
             df = None
 
-    with stage("PART A -- row arithmetic sanity", 4):
+    with stage("PART A -- row arithmetic sanity", 5):
         if df is not None:
             run_check("PART A", check_row_arithmetic, df, args.sample_size, rng)
         else:
             log("  Skipping -- no raw data could be loaded.")
 
-    with stage("PART B -- SKU reconciliation", 5):
+    with stage("PART B -- SKU reconciliation", 6):
         if df is not None:
             run_check("PART B", check_sku_reconciliation, df, args.sample_size, rng)
         else:
             log("  Skipping -- no raw data could be loaded.")
 
-    with stage("PART C -- build-time issues", 6):
+    with stage("PART C -- build-time issues", 7):
         run_check("PART C", check_build_issues)
 
     print_summary()

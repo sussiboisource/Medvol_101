@@ -46,6 +46,10 @@
   th:first-child, td:first-child { text-align: left; }
   thead th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; }
   tbody tr:hover { background: #f2f4f7; }
+  tr.clickable-row { cursor: pointer; }
+  .cell-pct { display: none; font-size: 10px; color: var(--muted); margin-top: 1px; }
+  tr.expanded .cell-pct { display: block; }
+  tr.expanded { background: var(--accent-soft); }
   .empty-state { color: var(--muted); padding: 24px; text-align: center; font-size: 13px; }
   .meta-banner {
     background: var(--warn-bg); border: 1px solid var(--warn-border); color: var(--warn-text);
@@ -194,6 +198,14 @@
         <label><input type="radio" name="np-discount-type" value="total"> Total discount (PTR + Cash)</label>
       </div>
     </div>
+    <div class="control-group">
+      <label class="group-label">Division (all checked by default)</label>
+      <div class="select-all-row">
+        <button type="button" class="select-all-btn" id="np-division-select-all">Select all</button>
+        <button type="button" class="select-all-btn" id="np-division-select-none">Deselect all</button>
+      </div>
+      <div class="entity-list" id="np-division-filter"></div>
+    </div>
   </div>
 
   <div class="panel-box">
@@ -263,11 +275,13 @@ function init() {
 
   setUpSelectAll('counter-division-select-all', 'counter-division-select-none', '.counter-division-checkbox', renderCounterTab);
   setUpSelectAll('division-entity-select-all', 'division-entity-select-none', '.division-entity-checkbox', renderDivisionTab);
+  setUpSelectAll('np-division-select-all', 'np-division-select-none', '.np-division-checkbox', renderNpTab);
 
   populateCounterDivisionFilter();
   renderCounterTab();
   populateDivisionEntities();
   renderDivisionTab();
+  populateNpDivisionFilter();
   renderNpTab();
 }
 
@@ -384,6 +398,25 @@ function renderFilteredCounterTable() {
   renderCounterTable(sortedEntities, counterGroupLabel);
 }
 
+function renderBucketTableRows(sortedEntities) {
+  return sortedEntities.map(([name, data]) => {
+    const cells = BUCKET_ORDER.map(b => {
+      const v = data.buckets[b] || 0;
+      const pct = data.total ? 100 * v / data.total : 0;
+      return '<td><div class="cell-value">' + formatMoney(v) + '</div><div class="cell-pct">' + pct.toFixed(1) + '% of row total</div></td>';
+    }).join('');
+    return '<tr class="clickable-row" title="Click to show % of this row\'s total">' +
+      '<td>' + escapeHtml(name) + '</td>' + cells +
+      '<td><strong>' + formatMoney(data.total) + '</strong></td></tr>';
+  }).join('');
+}
+
+function attachRowExpandToggle(container) {
+  container.querySelectorAll('tbody tr.clickable-row').forEach(row => {
+    row.addEventListener('click', () => row.classList.toggle('expanded'));
+  });
+}
+
 function renderCounterTable(sortedEntities, groupLabel) {
   const container = document.getElementById('counter-table');
   if (!sortedEntities.length) {
@@ -391,22 +424,28 @@ function renderCounterTable(sortedEntities, groupLabel) {
     return;
   }
   let html = '<table><thead><tr><th>' + groupLabel + '</th>' +
-    BUCKET_ORDER.map(b => '<th>' + b + '</th>').join('') + '<th>Total</th></tr></thead><tbody>';
-  sortedEntities.forEach(([name, data]) => {
-    html += '<tr><td>' + escapeHtml(name) + '</td>' +
-      BUCKET_ORDER.map(b => '<td>' + formatMoney(data.buckets[b] || 0) + '</td>').join('') +
-      '<td><strong>' + formatMoney(data.total) + '</strong></td></tr>';
-  });
-  html += '</tbody></table>';
+    BUCKET_ORDER.map(b => '<th>' + b + '</th>').join('') + '<th>Total</th></tr></thead><tbody>' +
+    renderBucketTableRows(sortedEntities) + '</tbody></table>';
   if (sortedEntities.length === 50) html += '<div class="empty-state">Showing top 50 by total sales.</div>';
   container.innerHTML = html;
+  attachRowExpandToggle(container);
 }
 
 // ---------- NP Discounts tab ----------
 
+function populateNpDivisionFilter() {
+  const divisions = Array.from(new Set(REPORT.np_discounts_tab.map(r => r.division))).sort();
+  const container = document.getElementById('np-division-filter');
+  container.innerHTML = divisions.map(d =>
+    '<label><input type="checkbox" class="np-division-checkbox" value="' + escapeHtml(d) + '" checked> ' + escapeHtml(d) + '</label>'
+  ).join('');
+  container.querySelectorAll('.np-division-checkbox').forEach(cb => cb.addEventListener('change', renderNpTab));
+}
+
 function renderNpTab() {
   const discountType = document.querySelector('input[name="np-discount-type"]:checked').value;
-  const rows = REPORT.np_discounts_tab.filter(r => r.discount_type === discountType);
+  const divisions = Array.from(document.querySelectorAll('.np-division-checkbox:checked')).map(cb => cb.value);
+  const rows = REPORT.np_discounts_tab.filter(r => r.discount_type === discountType && divisions.includes(r.division));
 
   const bucketTotals = {};
   BUCKET_ORDER.forEach(b => bucketTotals[b] = 0);
@@ -437,15 +476,11 @@ function renderNpTable(sortedEntities) {
     return;
   }
   let html = '<table><thead><tr><th>SKU</th>' +
-    BUCKET_ORDER.map(b => '<th>' + b + '</th>').join('') + '<th>Total</th></tr></thead><tbody>';
-  sortedEntities.forEach(([name, data]) => {
-    html += '<tr><td>' + escapeHtml(name) + '</td>' +
-      BUCKET_ORDER.map(b => '<td>' + formatMoney(data.buckets[b] || 0) + '</td>').join('') +
-      '<td><strong>' + formatMoney(data.total) + '</strong></td></tr>';
-  });
-  html += '</tbody></table>';
+    BUCKET_ORDER.map(b => '<th>' + b + '</th>').join('') + '<th>Total</th></tr></thead><tbody>' +
+    renderBucketTableRows(sortedEntities) + '</tbody></table>';
   if (sortedEntities.length === 50) html += '<div class="empty-state">Showing top 50 by total sales.</div>';
   container.innerHTML = html;
+  attachRowExpandToggle(container);
 }
 
 // ---------- Division tab ----------

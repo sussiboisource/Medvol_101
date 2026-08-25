@@ -74,8 +74,8 @@ def classify_status(status):
 
 
 def compute_canonical_date(df):
-    primary = pd.to_datetime(df[config.PRIMARY_DATE_COLUMN], errors="coerce")
-    fallback = pd.to_datetime(df[config.FALLBACK_DATE_COLUMN], errors="coerce")
+    primary = db.parse_dates(df[config.PRIMARY_DATE_COLUMN])
+    fallback = db.parse_dates(df[config.FALLBACK_DATE_COLUMN])
     return primary.fillna(fallback)
 
 
@@ -90,6 +90,17 @@ def canonicalize_labels(df):
             lambda s: s.mode().iloc[0] if not s.mode().empty else s.iloc[0]
         )
         df[col] = df[config.SKU_ID_COLUMN].map(mode_map)
+
+    # The per-SKU pass above stops one SKU from splitting, but Division_Name is a shared
+    # dimension across many SKUs -- two DIFFERENT SKUs can each independently carry a
+    # different casing of the same real division (e.g. "Aqura MS" vs "Aqura Ms"), which
+    # would otherwise show up as two separate entries in the Division filter/entity lists.
+    # Collapse case-only variants dataset-wide to whichever casing is most common overall.
+    division_mode_by_lower = (
+        df.groupby(df["Division_Name"].str.lower())["Division_Name"]
+        .agg(lambda s: s.mode().iloc[0] if not s.mode().empty else s.iloc[0])
+    )
+    df["Division_Name"] = df["Division_Name"].str.lower().map(division_mode_by_lower)
     return df
 
 
