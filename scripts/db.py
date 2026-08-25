@@ -24,6 +24,16 @@ def progress_bar(current, total, width=24):
     return "[" + "#" * filled + "-" * (width - filled) + f"] {current}/{total}"
 
 
+def strip_string_columns(df):
+    """Different export batches (different people, different times) can leave stray
+    whitespace on cells -- that silently breaks exact-match joins and status comparisons.
+    Strip every string column so 'DR123 ' and 'DR123' are treated as the same value."""
+    for col in df.columns:
+        if df[col].dtype == object:
+            df[col] = df[col].str.strip()
+    return df
+
+
 MONTH_NUMBERS = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5,
     "jun": 6, "june": 6, "jul": 7, "july": 7, "aug": 8,
@@ -157,6 +167,9 @@ def load_order_lines():
         elapsed = time.perf_counter() - t0
         missing_cols = set(config.EXPECTED_COLUMNS) - set(df.columns)
         if missing_cols:
+            severity = "MOST/ALL COLUMNS MISSING -- likely wrong sheet, shifted header, or empty file" \
+                if len(missing_cols) > len(config.EXPECTED_COLUMNS) / 2 else "some columns missing"
+            print(f"  WARNING [{severity}] {info['filename']}: found columns = {list(df.columns)}", flush=True)
             warnings.warn(f"{info['filename']} is missing expected columns: {missing_cols}")
         df["_source_file"] = info["filename"]
         df["_period_start"] = str(info["period_start"])
@@ -169,6 +182,11 @@ def load_order_lines():
             "files_loaded": [], "files_skipped": skipped_files,
             "duplicate_rows_dropped": 0, "duplicate_rows_conflicting": 0,
         }
+
+    print("Sanitizing: stripping stray whitespace (different export batches format cells differently) ...", flush=True)
+    t0 = time.perf_counter()
+    frames = [strip_string_columns(f) for f in frames]
+    print(f"  done in {time.perf_counter() - t0:.1f}s", flush=True)
 
     print("Combining files and checking for duplicate rows across overlapping files ...", flush=True)
     t0 = time.perf_counter()
@@ -217,7 +235,7 @@ def load_new_products():
             config.NEW_PRODUCTS_DIVISION_COLUMN, config.NEW_PRODUCTS_VERTICAL_COLUMN,
         ]), {"new_products_files": [], "duplicate_new_product_codes": 0}
 
-    frames = [_read_one_file(p) for p in paths]
+    frames = [strip_string_columns(_read_one_file(p)) for p in paths]
     combined = pd.concat(frames, ignore_index=True)
 
     dupe_mask = combined.duplicated(subset=[config.NEW_PRODUCTS_SKU_COLUMN], keep="first")
@@ -244,7 +262,7 @@ def load_brand_master():
             "brand_master_file_present": False, "duplicate_brand_master_codes": 0,
         }
 
-    df = _read_one_file(config.BRAND_MASTER_FILE)
+    df = strip_string_columns(_read_one_file(config.BRAND_MASTER_FILE))
     dupe_mask = df.duplicated(subset=[config.BRAND_MASTER_SKU_COLUMN], keep="first")
     duplicate_count = int(dupe_mask.sum())
     if duplicate_count:
@@ -261,11 +279,12 @@ def load_brand_master():
 def load_new_counters():
     """Reads the counter registration log (Allocated_CounterCode + Request_CreatedDate).
     Returns (DataFrame or None, meta). None means the file doesn't exist yet -- every counter
-    is 'Old' by default in that case, with no live cutoff-date control shown."""
+    is 'Old' by default in that case."""
     if not config.NEW_COUNTERS_FILE.exists():
+        print(f"  New-counters file not found at: {config.NEW_COUNTERS_FILE} -- every counter will be 'Old'.", flush=True)
         return None, {"new_counters_file_present": False, "duplicate_counter_codes": 0}
 
-    df = _read_one_file(config.NEW_COUNTERS_FILE)
+    df = strip_string_columns(_read_one_file(config.NEW_COUNTERS_FILE))
     dupe_mask = df.duplicated(subset=[config.NEW_COUNTERS_ID_COLUMN], keep="first")
     duplicate_count = int(dupe_mask.sum())
     if duplicate_count:
@@ -273,7 +292,16 @@ def load_new_counters():
             f"{duplicate_count} duplicate '{config.NEW_COUNTERS_ID_COLUMN}' entries in the new "
             f"counters file -- keeping first occurrence of each."
         )
-    return df[~dupe_mask], {
+    deduped = df[~dupe_mask]
+    parsed_dates = pd.to_datetime(deduped[config.NEW_COUNTERS_DATE_COLUMN], errors="coerce")
+    unparseable = int(parsed_dates.isna().sum())
+    print(
+        f"  New-counters file found: {len(deduped):,} rows, {len(deduped) - unparseable:,} with a "
+        f"parseable '{config.NEW_COUNTERS_DATE_COLUMN}' date"
+        + (f" -- {unparseable:,} could NOT be parsed (check the date format)." if unparseable else "."),
+        flush=True,
+    )
+    return deduped, {
         "new_counters_file_present": True,
         "duplicate_counter_codes": duplicate_count,
     }
@@ -292,6 +320,26 @@ def join_brand_master(orders_df, brand_master_df):
     return result
 
 
+def join_counter_age(orders_df, new_counters_df, cutoff_date):
+    """Adds a Counter_Age column ('Old' / 'New'), computed once at build time. A counter is
+    'New' if it's in the new-counters file with a creation date on/after cutoff_date; every
+    other counter (including any not in the file at all) is 'Old'. If new_counters_df is None
+    or cutoff_date is None, every counter is 'Old'."""
+    result = orders_df.copy()
+    if new_counters_df is None or cutoff_date is None:
+        result["Counter_Age"] = "Old"
+        return result
+
+    dates = pd.to_datetime(new_counters_df[config.NEW_COUNTERS_DATE_COLUMN], errors="coerce")
+    lookup = pd.Series(dates.values, index=new_counters_df[config.NEW_COUNTERS_ID_COLUMN])
+    creation_dates = result[config.COUNTER_ID_COLUMN].map(lookup)
+
+    is_new = creation_dates.notna() & (creation_dates >= pd.to_datetime(cutoff_date))
+    result["Counter_Age"] = "Old"
+    result.loc[is_new, "Counter_Age"] = "New"
+    return result
+
+
 def new_product_sku_set(new_products_df):
     """The set of Item_Codes considered 'new products' for Tab 3, from item_brand_mapping.csv."""
     if new_products_df.empty:
@@ -299,15 +347,3 @@ def new_product_sku_set(new_products_df):
     return set(new_products_df[config.NEW_PRODUCTS_SKU_COLUMN].dropna())
 
 
-def counter_creation_date_lookup(new_counters_df):
-    """Returns {Doctor_Code: ISO-date-string} for every counter in the new-counters file --
-    shipped into the JSON so the browser can classify New/Old live against any cutoff date."""
-    if new_counters_df is None or new_counters_df.empty:
-        return {}
-    dates = pd.to_datetime(new_counters_df[config.NEW_COUNTERS_DATE_COLUMN], errors="coerce")
-    codes = new_counters_df[config.NEW_COUNTERS_ID_COLUMN]
-    lookup = {}
-    for code, date in zip(codes, dates):
-        if pd.notna(date) and pd.notna(code):
-            lookup[code] = date.strftime("%Y-%m-%d")
-    return lookup

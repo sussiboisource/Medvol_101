@@ -93,10 +93,6 @@
       </div>
     </div>
     <div class="control-group">
-      <label class="group-label">"New" means created on/after</label>
-      <input type="date" id="age-cutoff-date">
-    </div>
-    <div class="control-group">
       <label class="group-label">Discount Filter</label>
       <div class="radio-row">
         <label><input type="radio" name="discount-type" value="ptr_only" checked> DiscountOnPTR only</label>
@@ -228,7 +224,7 @@ function init() {
     });
   });
 
-  ['age-old', 'age-new', 'age-cutoff-date'].forEach(id => document.getElementById(id).addEventListener('change', renderCounterTab));
+  ['age-old', 'age-new'].forEach(id => document.getElementById(id).addEventListener('change', renderCounterTab));
   document.querySelectorAll('input[name="discount-type"]').forEach(el => el.addEventListener('change', renderCounterTab));
   document.getElementById('counter-group-by').addEventListener('change', renderCounterTab);
 
@@ -248,12 +244,6 @@ function init() {
   renderNpTab();
 }
 
-function counterAge(doctorCode, cutoffDateStr) {
-  const creation = REPORT.counter_creation_dates[doctorCode];
-  if (!creation || !cutoffDateStr) return 'Old';
-  return creation >= cutoffDateStr ? 'New' : 'Old';
-}
-
 function renderMetaBanner() {
   const m = REPORT.meta;
   const notes = [];
@@ -270,9 +260,11 @@ function renderMetaBanner() {
     notes.push(m.valid_rows_with_unmapped_brand + ' valid row(s) have no brand match yet (Unmapped) in brand_master.csv — Division tab brand-level views are partial until the full master list is loaded.');
   }
   if (!m.new_counters_file_present) {
-    notes.push('No new-counters file yet — every counter is shown as "Old" and the cutoff-date picker has nothing to compare against.');
+    notes.push('No new-counters file yet — every counter is shown as "Old".');
+  } else if (!m.counter_age_cutoff_date) {
+    notes.push('New-counters file loaded, but no cutoff date is set (scripts/config.py: COUNTER_AGE_CUTOFF_DATE) — every counter is currently "Old". Edit that value and rerun the build script to split New/Old.');
   } else {
-    notes.push(m.known_counter_creation_dates + ' counter(s) have a known creation date. Pick a cutoff date on the Counter tab to split New/Old.');
+    notes.push(m.new_counter_valid_rows.toLocaleString() + ' valid row(s) classified "New" (cutoff: ' + m.counter_age_cutoff_date + '). Change the cutoff in scripts/config.py and rerun the build script to adjust.');
   }
   notes.push('NP Discounts tab: ' + m.new_product_sku_count + ' SKUs are on the new-products list; only those with real order data show up in the chart/table.');
   if (m.missing_month_ranges && m.missing_month_ranges.length) {
@@ -302,17 +294,16 @@ function getCounterFilters() {
   const ages = [];
   if (document.getElementById('age-old').checked) ages.push('Old');
   if (document.getElementById('age-new').checked) ages.push('New');
-  const cutoffDate = document.getElementById('age-cutoff-date').value;
   const discountType = document.querySelector('input[name="discount-type"]:checked').value;
   const groupBy = document.getElementById('counter-group-by').value;
   const divisions = Array.from(document.querySelectorAll('.counter-division-checkbox:checked')).map(cb => cb.value);
-  return { ages, cutoffDate, discountType, groupBy, divisions };
+  return { ages, discountType, groupBy, divisions };
 }
 
 function renderCounterTab() {
-  const { ages, cutoffDate, discountType, groupBy, divisions } = getCounterFilters();
+  const { ages, discountType, groupBy, divisions } = getCounterFilters();
   const rows = REPORT.counter_tab.filter(r =>
-    ages.includes(counterAge(r.doctor_code, cutoffDate)) && r.discount_type === discountType
+    ages.includes(r.counter_age) && r.discount_type === discountType
     && divisions.includes(r.division)
   );
 

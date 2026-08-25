@@ -66,9 +66,12 @@ NEW_PRODUCTS_VERTICAL_COLUMN = "Vertical"
 
 UNMAPPED_BRAND_LABEL = "Unmapped"
 
-# New/Old counter age is decided live in the dashboard (viewer picks a cutoff date), not baked
-# in at build time -- see ARCHITECTURE.md. build_report_data.py ships each counter's raw
-# creation date; the browser does the New/Old split.
+# New/Old counter age cutoff, computed ONCE at build time. Reverted from a live in-browser
+# picker: at real data scale, shipping one JSON record per counter for live classification
+# produced a 300k+ record Counter tab that made the dashboard unusable (see ARCHITECTURE.md).
+# None = every counter is "Old". To change the cutoff, edit this and rerun the build script --
+# a rebuild takes seconds, so this is not a meaningful loss of flexibility in practice.
+COUNTER_AGE_CUTOFF_DATE = None
 
 # Division Trend tab's intended time window. Informational only -- data outside this range
 # is not clipped, just what the tab is meant to cover.

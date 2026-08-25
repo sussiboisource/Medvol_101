@@ -57,11 +57,18 @@ def to_numeric(series, fill_value=None):
     return numeric
 
 
+_VALID_STATUSES_NORMALIZED = {" ".join(s.split()).strip().lower() for s in config.VALID_ORDER_STATUSES}
+
+
 def classify_status(status):
-    if status in config.VALID_ORDER_STATUSES:
+    """Different export batches (different people, different times) can format the same
+    status differently -- extra whitespace, different casing. Compare on a normalized form so
+    "Fully Invoiced ", "fully  invoiced", etc. all still match, instead of silently falling
+    into Unclassified."""
+    normalized = " ".join(str(status).split()).strip().lower()
+    if normalized in _VALID_STATUSES_NORMALIZED:
         return "Valid"
-    status_lower = str(status).lower()
-    if any(keyword in status_lower for keyword in config.EXCLUDED_STATUS_KEYWORDS):
+    if any(keyword in normalized for keyword in config.EXCLUDED_STATUS_KEYWORDS):
         return "Excluded"
     return "Unclassified"
 
@@ -117,14 +124,12 @@ def add_derived_columns(df):
 
 
 def build_counter_tab(valid_df):
-    """Grain: Doctor_Code x SKU x discount bucket. Counter_Age is NOT pre-computed here --
-    the viewer picks a New/Old cutoff date live in the dashboard, so the raw Doctor_Code (and
-    the separately-shipped counter_creation_dates lookup) travel together and the browser does
-    the classification at render time."""
+    """Grain: Counter_Age x SKU x discount bucket. Counter_Age is pre-computed once at build
+    time (config.COUNTER_AGE_CUTOFF_DATE) -- per-counter (Doctor_Code) granularity was tried
+    and abandoned: at real data scale it produced 300k+ JSON records and made the dashboard
+    unusable. Only 2 age values instead of thousands of counters keeps this small."""
     records = []
-    group_cols = [
-        config.COUNTER_ID_COLUMN, config.SKU_ID_COLUMN, "Item_Description", "Brand", "Division_Name",
-    ]
+    group_cols = ["Counter_Age", config.SKU_ID_COLUMN, "Item_Description", "Brand", "Division_Name"]
 
     for bucket_col, discount_type in (("_bucket_ptr_only", "ptr_only"), ("_bucket_total", "total")):
         grouped = (
@@ -138,7 +143,7 @@ def build_counter_tab(valid_df):
 
     return [
         {
-            "doctor_code": r[config.COUNTER_ID_COLUMN],
+            "counter_age": r["Counter_Age"],
             "item_code": r[config.SKU_ID_COLUMN],
             "item_description": r["Item_Description"],
             "brand": r["Brand"],
@@ -253,19 +258,27 @@ def main():
     with stage(f"Computing derived columns for {len(orders_df):,} rows (dates, discount math, buckets)"):
         orders_df = add_derived_columns(orders_df)
         orders_df = db.join_brand_master(orders_df, brand_master_df)
+        orders_df = db.join_counter_age(orders_df, new_counters_df, config.COUNTER_AGE_CUTOFF_DATE)
 
         status_counts = orders_df["_status_class"].value_counts().to_dict()
-        unclassified_statuses = sorted(
-            orders_df.loc[orders_df["_status_class"] == "Unclassified", "Order_Status"].unique().tolist()
+        unclassified_status_counts = (
+            orders_df.loc[orders_df["_status_class"] == "Unclassified", "Order_Status"]
+            .value_counts().to_dict()
         )
+        unclassified_statuses = sorted(unclassified_status_counts.keys())
         valid_df = orders_df[orders_df["_status_class"] == "Valid"].copy()
 
         nan_amount_rows = int(valid_df["_amount"].isna().sum())
         nan_invoice_rows = int(valid_df["_invoice_amount"].isna().sum())
         unmapped_brand_rows = int((valid_df["Brand"] == config.UNMAPPED_BRAND_LABEL).sum())
+        new_counter_rows = int((valid_df["Counter_Age"] == "New").sum())
 
         new_product_skus = db.new_product_sku_set(new_products_df)
-        counter_creation_dates = db.counter_creation_date_lookup(new_counters_df)
+
+    if unclassified_status_counts:
+        print(f"  Unclassified Order_Status breakdown ({sum(unclassified_status_counts.values()):,} rows total):", flush=True)
+        for status, count in sorted(unclassified_status_counts.items(), key=lambda kv: -kv[1])[:20]:
+            print(f"    {count:>10,}  {status!r}", flush=True)
 
     with stage(f"Aggregating {len(valid_df):,} valid rows into the 3 tabs"):
         counter_tab = build_counter_tab(valid_df)
@@ -298,19 +311,19 @@ def main():
             "duplicate_brand_master_codes": brand_master_meta["duplicate_brand_master_codes"],
             "new_counters_file_present": new_counters_meta["new_counters_file_present"],
             "duplicate_counter_codes": new_counters_meta["duplicate_counter_codes"],
-            "known_counter_creation_dates": len(counter_creation_dates),
+            "counter_age_cutoff_date": config.COUNTER_AGE_CUTOFF_DATE,
+            "new_counter_valid_rows": new_counter_rows,
             "trend_window": {"start": config.TREND_START_MONTH, "end": config.TREND_END_MONTH},
             "missing_month_ranges": missing_month_ranges,
         },
         "counter_tab": counter_tab,
         "division_tab": division_tab,
         "np_discounts_tab": np_discounts_tab,
-        "counter_creation_dates": counter_creation_dates,
     }
 
     with stage("Writing output/report_data.json and embedding it into dashboard.html"):
         config.OUTPUT_DIR.mkdir(exist_ok=True)
-        report_json_str = json.dumps(output, indent=2)
+        report_json_str = json.dumps(output, separators=(",", ":"))
         with open(config.REPORT_JSON_PATH, "w", encoding="utf-8") as f:
             f.write(report_json_str)
         embed_data_in_dashboard(report_json_str)
@@ -324,7 +337,7 @@ def main():
     print(f"  counter_tab records: {len(counter_tab):,}")
     print(f"  division_tab records: {len(division_tab):,}")
     print(f"  np_discounts_tab records: {len(np_discounts_tab):,} (from {len(new_product_skus)} new-product SKUs)")
-    print(f"  known counter creation dates: {len(counter_creation_dates):,}")
+    print(f"  counter age cutoff: {config.COUNTER_AGE_CUTOFF_DATE!r} -- {new_counter_rows:,} valid rows classified 'New'")
 
 
 if __name__ == "__main__":
