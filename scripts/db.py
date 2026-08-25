@@ -17,6 +17,19 @@ import pandas as pd
 
 import config
 
+# Every problem the pipeline hit while running -- file read failures, severe schema mismatches,
+# duplicate keys, etc. Collected here so build_report_data.py can put them in the JSON and the
+# dashboard can show them directly, instead of them only ever appearing in the terminal (which
+# is exactly how "some data got silently missed" goes unnoticed).
+BUILD_ISSUES = []
+
+
+def report_issue(severity, message):
+    """severity: 'error' (some real data was skipped/lost) or 'warning' (handled, but worth a
+    look). Always also prints immediately, so the terminal output stays informative too."""
+    BUILD_ISSUES.append({"severity": severity, "message": message})
+    print(f"  {severity.upper()}: {message}", flush=True)
+
 
 def progress_bar(current, total, width=24):
     """Text progress bar, e.g. '[################--------] 16/24'. No external deps."""
@@ -160,17 +173,32 @@ def load_order_lines():
     total_files = len(file_infos)
 
     frames = []
+    files_failed = []
     for i, info in enumerate(file_infos, start=1):
         print(f"{progress_bar(i - 1, total_files)} reading {info['filename']} ...", flush=True)
         t0 = time.perf_counter()
-        df = _read_one_file(info["path"])
+        try:
+            df = _read_one_file(info["path"])
+        except Exception as exc:
+            report_issue(
+                "error",
+                f"MISSED ENTIRE FILE '{info['filename']}' -- could not be read at all "
+                f"({type(exc).__name__}: {exc}). None of its data is included in this report."
+            )
+            files_failed.append(info["filename"])
+            continue
         elapsed = time.perf_counter() - t0
         missing_cols = set(config.EXPECTED_COLUMNS) - set(df.columns)
         if missing_cols:
-            severity = "MOST/ALL COLUMNS MISSING -- likely wrong sheet, shifted header, or empty file" \
-                if len(missing_cols) > len(config.EXPECTED_COLUMNS) / 2 else "some columns missing"
-            print(f"  WARNING [{severity}] {info['filename']}: found columns = {list(df.columns)}", flush=True)
-            warnings.warn(f"{info['filename']} is missing expected columns: {missing_cols}")
+            if len(missing_cols) > len(config.EXPECTED_COLUMNS) / 2:
+                report_issue(
+                    "error",
+                    f"MOST/ALL COLUMNS MISSING in '{info['filename']}' (found columns: "
+                    f"{list(df.columns)}) -- likely wrong sheet, shifted header, or an empty "
+                    f"file. Its data is probably NOT correctly included in this report."
+                )
+            else:
+                report_issue("warning", f"'{info['filename']}' is missing some expected columns: {sorted(missing_cols)}")
         df["_source_file"] = info["filename"]
         df["_period_start"] = str(info["period_start"])
         df["_period_end"] = str(info["period_end"])
@@ -179,7 +207,7 @@ def load_order_lines():
 
     if not frames:
         return pd.DataFrame(columns=config.EXPECTED_COLUMNS), {
-            "files_loaded": [], "files_skipped": skipped_files,
+            "files_loaded": [], "files_skipped": skipped_files, "files_failed": files_failed,
             "duplicate_rows_dropped": 0, "duplicate_rows_conflicting": 0,
         }
 
@@ -211,9 +239,26 @@ def load_order_lines():
     deduped = combined.drop(index=rows_to_drop)
     print(f"  done in {time.perf_counter() - t0:.1f}s ({len(deduped):,} rows after dedup)", flush=True)
 
+    if skipped_files:
+        report_issue(
+            "error",
+            f"MISSED {len(skipped_files)} FILE(S) -- no parseable period in the filename and no "
+            f"file_periods.csv entry, so they were never even opened: {skipped_files}. None of "
+            f"their data is included in this report."
+        )
+    if conflicting_keys:
+        report_issue(
+            "warning",
+            f"{len(conflicting_keys)} order line(s) appear in more than one file with DIFFERENT "
+            f"values -- kept all copies rather than guessing which is right, needs manual review. "
+            f"Sample keys: {conflicting_keys[:10]}"
+        )
+
+    loaded_filenames = [info["filename"] for info in file_infos if info["filename"] not in files_failed]
     meta = {
-        "files_loaded": [info["filename"] for info in file_infos],
+        "files_loaded": loaded_filenames,
         "files_skipped": skipped_files,
+        "files_failed": files_failed,
         "duplicate_rows_dropped": len(rows_to_drop),
         "duplicate_rows_conflicting": len(conflicting_keys),
         "conflicting_keys_sample": conflicting_keys[:10],
@@ -235,13 +280,24 @@ def load_new_products():
             config.NEW_PRODUCTS_DIVISION_COLUMN, config.NEW_PRODUCTS_VERTICAL_COLUMN,
         ]), {"new_products_files": [], "duplicate_new_product_codes": 0}
 
-    frames = [strip_string_columns(_read_one_file(p)) for p in paths]
+    frames = []
+    for p in paths:
+        try:
+            frames.append(strip_string_columns(_read_one_file(p)))
+        except Exception as exc:
+            report_issue("error", f"MISSED new-products file '{p.name}' -- could not be read ({type(exc).__name__}: {exc}).")
+    if not frames:
+        return pd.DataFrame(columns=[
+            config.NEW_PRODUCTS_SKU_COLUMN, config.NEW_PRODUCTS_BRAND_COLUMN,
+            config.NEW_PRODUCTS_DIVISION_COLUMN, config.NEW_PRODUCTS_VERTICAL_COLUMN,
+        ]), {"new_products_files": [], "duplicate_new_product_codes": 0}
     combined = pd.concat(frames, ignore_index=True)
 
     dupe_mask = combined.duplicated(subset=[config.NEW_PRODUCTS_SKU_COLUMN], keep="first")
     duplicate_count = int(dupe_mask.sum())
     if duplicate_count:
-        warnings.warn(
+        report_issue(
+            "warning",
             f"{duplicate_count} duplicate '{config.NEW_PRODUCTS_SKU_COLUMN}' entries in the "
             f"new-products file(s) -- keeping first occurrence of each, dropping the rest."
         )
@@ -262,11 +318,18 @@ def load_brand_master():
             "brand_master_file_present": False, "duplicate_brand_master_codes": 0,
         }
 
-    df = strip_string_columns(_read_one_file(config.BRAND_MASTER_FILE))
+    try:
+        df = strip_string_columns(_read_one_file(config.BRAND_MASTER_FILE))
+    except Exception as exc:
+        report_issue("error", f"MISSED brand_master.csv -- could not be read ({type(exc).__name__}: {exc}). Every SKU will show as Unmapped.")
+        return pd.DataFrame(columns=[config.BRAND_MASTER_SKU_COLUMN, config.BRAND_MASTER_BRAND_COLUMN]), {
+            "brand_master_file_present": False, "duplicate_brand_master_codes": 0,
+        }
     dupe_mask = df.duplicated(subset=[config.BRAND_MASTER_SKU_COLUMN], keep="first")
     duplicate_count = int(dupe_mask.sum())
     if duplicate_count:
-        warnings.warn(
+        report_issue(
+            "warning",
             f"{duplicate_count} duplicate '{config.BRAND_MASTER_SKU_COLUMN}' entries in "
             f"brand_master.csv -- keeping first occurrence of each."
         )
@@ -284,11 +347,16 @@ def load_new_counters():
         print(f"  New-counters file not found at: {config.NEW_COUNTERS_FILE} -- every counter will be 'Old'.", flush=True)
         return None, {"new_counters_file_present": False, "duplicate_counter_codes": 0}
 
-    df = strip_string_columns(_read_one_file(config.NEW_COUNTERS_FILE))
+    try:
+        df = strip_string_columns(_read_one_file(config.NEW_COUNTERS_FILE))
+    except Exception as exc:
+        report_issue("error", f"MISSED new-counters file -- could not be read ({type(exc).__name__}: {exc}). Every counter will show as 'Old'.")
+        return None, {"new_counters_file_present": False, "duplicate_counter_codes": 0}
     dupe_mask = df.duplicated(subset=[config.NEW_COUNTERS_ID_COLUMN], keep="first")
     duplicate_count = int(dupe_mask.sum())
     if duplicate_count:
-        warnings.warn(
+        report_issue(
+            "warning",
             f"{duplicate_count} duplicate '{config.NEW_COUNTERS_ID_COLUMN}' entries in the new "
             f"counters file -- keeping first occurrence of each."
         )

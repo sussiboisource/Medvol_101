@@ -51,6 +51,11 @@
     background: var(--warn-bg); border: 1px solid var(--warn-border); color: var(--warn-text);
     border-radius: 8px; padding: 10px 16px; margin: 0 28px 16px; font-size: 12.5px; line-height: 1.5;
   }
+  .error-banner {
+    background: #fef2f2; border: 1px solid #fca5a5; color: #991b1b;
+    border-radius: 8px; padding: 10px 16px; margin: 0 28px 16px; font-size: 12.5px; line-height: 1.5;
+  }
+  .error-banner .issue-warning { color: #9a3412; }
   .entity-list { max-height: 220px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; min-width: 220px; }
   .entity-list label { display: flex; align-items: center; gap: 6px; font-size: 12.5px; padding: 3px 0; cursor: pointer; }
   svg text { font-family: inherit; }
@@ -64,6 +69,12 @@
     border: 1px solid var(--border); border-radius: 6px; font-size: 13px; background: var(--panel);
   }
   .totals-table-title { font-size: 12px; font-weight: 600; color: var(--muted); margin: 20px 0 8px; text-transform: uppercase; }
+  .select-all-row { display: flex; gap: 8px; margin-bottom: 4px; }
+  .select-all-btn {
+    font-size: 11px; padding: 3px 8px; border: 1px solid var(--border); border-radius: 5px;
+    background: var(--panel); color: var(--accent); cursor: pointer;
+  }
+  .select-all-btn:hover { background: var(--accent-soft); }
 </style>
 </head>
 <body>
@@ -74,7 +85,7 @@
 </header>
 
 <div class="tabs">
-  <button class="tab-btn active" data-tab="counter">Counter Tab</button>
+  <button class="tab-btn active" data-tab="counter">Discount Dispersion Tab</button>
   <button class="tab-btn" data-tab="division">Division Trend Tab</button>
   <button class="tab-btn" data-tab="np">NP Discounts Tab</button>
 </div>
@@ -103,11 +114,15 @@
       <label class="group-label">Group table by</label>
       <select id="counter-group-by">
         <option value="item_code">SKU</option>
-        <option value="brand">Brand</option>
+        <option value="division">Division</option>
       </select>
     </div>
     <div class="control-group">
       <label class="group-label">Division (all checked by default)</label>
+      <div class="select-all-row">
+        <button type="button" class="select-all-btn" id="counter-division-select-all">Select all</button>
+        <button type="button" class="select-all-btn" id="counter-division-select-none">Deselect all</button>
+      </div>
       <div class="entity-list" id="counter-division-filter"></div>
     </div>
   </div>
@@ -137,8 +152,8 @@
     <div class="control-group">
       <label class="group-label">View by</label>
       <select id="division-period-mode">
+        <option value="fy" selected>Financial Year (Apr–Mar)</option>
         <option value="month">Month</option>
-        <option value="fy">Financial Year (Apr–Mar)</option>
       </select>
     </div>
     <div class="control-group">
@@ -150,6 +165,10 @@
     </div>
     <div class="control-group">
       <label class="group-label">Entities shown (top 5 by sales, editable)</label>
+      <div class="select-all-row">
+        <button type="button" class="select-all-btn" id="division-entity-select-all">Select all</button>
+        <button type="button" class="select-all-btn" id="division-entity-select-none">Deselect all</button>
+      </div>
       <div class="entity-list" id="division-entity-list"></div>
     </div>
   </div>
@@ -160,6 +179,9 @@
     <div class="legend" id="division-legend"></div>
     <p class="totals-table-title">Totals across the shown period (actual value + %)</p>
     <div id="division-totals-table"></div>
+    <p class="totals-table-title">Breakdown by period (actual value + %)</p>
+    <input type="text" class="table-filter" id="division-period-table-filter" placeholder="Filter by name...">
+    <div id="division-period-table"></div>
   </div>
 </div>
 
@@ -194,6 +216,7 @@ const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct'
 const LEVEL_LABELS = { division: 'division', brand: 'brand', item_code: 'SKU' };
 
 let REPORT = null;
+let divisionPeriodRows = [];
 let counterByEntity = {};
 let counterGroupLabel = 'SKU';
 let npByEntity = {};
@@ -236,6 +259,10 @@ function init() {
 
   document.getElementById('counter-table-filter').addEventListener('input', renderFilteredCounterTable);
   document.getElementById('np-table-filter').addEventListener('input', renderFilteredNpTable);
+  document.getElementById('division-period-table-filter').addEventListener('input', renderFilteredDivisionPeriodTable);
+
+  setUpSelectAll('counter-division-select-all', 'counter-division-select-none', '.counter-division-checkbox', renderCounterTab);
+  setUpSelectAll('division-entity-select-all', 'division-entity-select-none', '.division-entity-checkbox', renderDivisionTab);
 
   populateCounterDivisionFilter();
   renderCounterTab();
@@ -244,8 +271,33 @@ function init() {
   renderNpTab();
 }
 
+function setUpSelectAll(allBtnId, noneBtnId, checkboxSelector, onChange) {
+  document.getElementById(allBtnId).addEventListener('click', () => {
+    document.querySelectorAll(checkboxSelector).forEach(cb => cb.checked = true);
+    onChange();
+  });
+  document.getElementById(noneBtnId).addEventListener('click', () => {
+    document.querySelectorAll(checkboxSelector).forEach(cb => cb.checked = false);
+    onChange();
+  });
+}
+
 function renderMetaBanner() {
   const m = REPORT.meta;
+
+  if (m.build_issues && m.build_issues.length) {
+    const errors = m.build_issues.filter(i => i.severity === 'error');
+    const warningsList = m.build_issues.filter(i => i.severity !== 'error');
+    const el = document.createElement('div');
+    el.className = 'error-banner';
+    let html = '<strong>Internal codebase issues hit while building this report'
+      + (errors.length ? ' (' + errors.length + ' likely mean some data is missing)' : '') + ':</strong><br>';
+    errors.forEach(i => { html += '&bull; <strong>' + escapeHtml(i.message) + '</strong><br>'; });
+    warningsList.forEach(i => { html += '&bull; <span class="issue-warning">' + escapeHtml(i.message) + '</span><br>'; });
+    el.innerHTML = html;
+    document.getElementById('meta-banner-slot').appendChild(el);
+  }
+
   const notes = [];
   if (m.row_counts.unclassified > 0) {
     notes.push(m.row_counts.unclassified + ' row(s) had an unrecognized Order_Status (' + m.unclassified_statuses.join(', ') + ') — excluded from totals, shown here for visibility.');
@@ -312,12 +364,12 @@ function renderCounterTab() {
   rows.forEach(r => { bucketTotals[r.bucket] = (bucketTotals[r.bucket] || 0) + r.amount; });
   renderBarChart(document.getElementById('counter-bar-chart'), BUCKET_ORDER, BUCKET_ORDER.map(b => bucketTotals[b]));
 
-  counterGroupLabel = groupBy === 'brand' ? 'Brand' : 'SKU';
+  counterGroupLabel = groupBy === 'division' ? 'Division' : 'SKU';
   document.getElementById('counter-table-title').textContent = 'Sales by ' + counterGroupLabel + ' x discount range';
 
   counterByEntity = {};
   rows.forEach(r => {
-    const key = groupBy === 'brand' ? r.brand : (r.item_code + ' — ' + r.item_description);
+    const key = groupBy === 'division' ? r.division : (r.item_code + ' — ' + r.item_description);
     if (!counterByEntity[key]) counterByEntity[key] = { total: 0, buckets: {} };
     counterByEntity[key].buckets[r.bucket] = (counterByEntity[key].buckets[r.bucket] || 0) + r.amount;
     counterByEntity[key].total += r.amount;
@@ -475,6 +527,54 @@ function renderDivisionTab() {
   ).join('');
 
   renderDivisionTotalsTable(level, selected);
+  renderDivisionPeriodTable(level, periodMode, selected);
+}
+
+function renderDivisionPeriodTable(level, periodMode, selected) {
+  const byPeriodEntity = {};
+  REPORT.division_tab.forEach(r => {
+    const key = r[level];
+    if (!selected.includes(key)) return;
+    const period = periodMode === 'fy' ? fyLabel(r.month) : r.month;
+    const cellKey = period + '|' + key;
+    if (!byPeriodEntity[cellKey]) byPeriodEntity[cellKey] = { period, key, amount: 0, invoice: 0, gross: 0 };
+    byPeriodEntity[cellKey].amount += r.amount_sum;
+    byPeriodEntity[cellKey].invoice += r.invoice_amount_sum;
+    byPeriodEntity[cellKey].gross += r.gross_sales_sum;
+  });
+
+  divisionPeriodRows = Object.values(byPeriodEntity).sort((a, b) =>
+    a.period === b.period ? a.key.localeCompare(b.key) : a.period.localeCompare(b.period)
+  );
+  window._divisionPeriodLevel = level;
+  renderFilteredDivisionPeriodTable();
+}
+
+function renderFilteredDivisionPeriodTable() {
+  const level = window._divisionPeriodLevel || 'division';
+  const filterText = document.getElementById('division-period-table-filter').value.trim().toLowerCase();
+  const rows = divisionPeriodRows.filter(r => r.key.toLowerCase().includes(filterText));
+
+  const container = document.getElementById('division-period-table');
+  if (!rows.length) {
+    container.innerHTML = '<div class="empty-state">No data for this selection.</div>';
+    return;
+  }
+  const entityLabel = LEVEL_LABELS[level].charAt(0).toUpperCase() + LEVEL_LABELS[level].slice(1);
+  let html = '<table><thead><tr><th>Period</th><th>' + entityLabel +
+    '</th><th>Amount</th><th>Invoice Amount</th><th>Gross Sales</th><th>Medvol %</th><th>Net Sales %</th></tr></thead><tbody>';
+  rows.forEach(r => {
+    const medvolPct = r.gross ? 100 * r.amount / r.gross : 0;
+    const netSalesPct = r.gross ? 100 * r.invoice / r.gross : 0;
+    html += '<tr><td>' + r.period + '</td><td>' + escapeHtml(r.key) + '</td>' +
+      '<td>' + formatMoney(r.amount) + '</td>' +
+      '<td>' + formatMoney(r.invoice) + '</td>' +
+      '<td>' + formatMoney(r.gross) + '</td>' +
+      '<td>' + medvolPct.toFixed(1) + '%</td>' +
+      '<td>' + netSalesPct.toFixed(1) + '%</td></tr>';
+  });
+  html += '</tbody></table>';
+  container.innerHTML = html;
 }
 
 function renderDivisionTotalsTable(level, selected) {

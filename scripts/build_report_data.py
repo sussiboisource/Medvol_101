@@ -128,8 +128,10 @@ def build_counter_tab(valid_df):
     time (config.COUNTER_AGE_CUTOFF_DATE) -- per-counter (Doctor_Code) granularity was tried
     and abandoned: at real data scale it produced 300k+ JSON records and made the dashboard
     unusable. Only 2 age values instead of thousands of counters keeps this small."""
+    # Brand is deliberately excluded here -- only the Division Trend tab needs it. Fewer
+    # group-by columns also means fewer distinct records, which matters at real data scale.
     records = []
-    group_cols = ["Counter_Age", config.SKU_ID_COLUMN, "Item_Description", "Brand", "Division_Name"]
+    group_cols = ["Counter_Age", config.SKU_ID_COLUMN, "Item_Description", "Division_Name"]
 
     for bucket_col, discount_type in (("_bucket_ptr_only", "ptr_only"), ("_bucket_total", "total")):
         grouped = (
@@ -146,7 +148,6 @@ def build_counter_tab(valid_df):
             "counter_age": r["Counter_Age"],
             "item_code": r[config.SKU_ID_COLUMN],
             "item_description": r["Item_Description"],
-            "brand": r["Brand"],
             "division": r["Division_Name"],
             "discount_type": r["discount_type"],
             "bucket": str(r["bucket"]),
@@ -159,10 +160,10 @@ def build_counter_tab(valid_df):
 
 def build_np_discounts_tab(valid_df, new_product_skus):
     """Tab 3: same 9 discount buckets as Tab 1, but only for SKUs in the new-products list
-    (item_brand_mapping.csv), at SKU level."""
+    (item_brand_mapping.csv), at SKU level. No Brand -- see build_counter_tab."""
     df = valid_df[valid_df[config.SKU_ID_COLUMN].isin(new_product_skus)]
     records = []
-    group_cols = [config.SKU_ID_COLUMN, "Item_Description", "Brand", "Division_Name"]
+    group_cols = [config.SKU_ID_COLUMN, "Item_Description", "Division_Name"]
 
     for bucket_col, discount_type in (("_bucket_ptr_only", "ptr_only"), ("_bucket_total", "total")):
         grouped = (
@@ -178,7 +179,6 @@ def build_np_discounts_tab(valid_df, new_product_skus):
         {
             "item_code": r[config.SKU_ID_COLUMN],
             "item_description": r["Item_Description"],
-            "brand": r["Brand"],
             "division": r["Division_Name"],
             "discount_type": r["discount_type"],
             "bucket": str(r["bucket"]),
@@ -246,6 +246,7 @@ def compute_missing_month_ranges(division_tab):
 
 def main():
     run_start = time.perf_counter()
+    db.BUILD_ISSUES.clear()
 
     print("Loading order-line files (data/) ...", flush=True)
     orders_df, load_meta = db.load_order_lines()
@@ -315,6 +316,7 @@ def main():
             "new_counter_valid_rows": new_counter_rows,
             "trend_window": {"start": config.TREND_START_MONTH, "end": config.TREND_END_MONTH},
             "missing_month_ranges": missing_month_ranges,
+            "build_issues": list(db.BUILD_ISSUES),
         },
         "counter_tab": counter_tab,
         "division_tab": division_tab,
