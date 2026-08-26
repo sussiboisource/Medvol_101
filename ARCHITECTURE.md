@@ -38,8 +38,8 @@ since both are always generated fresh from the layers below them.
 |------|--------|----------|
 | `config.py` | ✅ exists | Every tunable value as a named constant: file paths, the 9 discount bucket edges/labels (`DISCOUNT_BUCKET_EDGES`/`LABELS` — the 65–80 gap is intentionally wider than the surrounding steps, confirmed by the user, not a typo), valid `Order_Status` values (`VALID_ORDER_STATUSES`) and excluded-status keywords, the canonical date column pair, join-key column names, `COUNTER_AGE_CUTOFF_DATE` (New/Old split — three modes: `"auto"` (default) uses the earliest parseable `Request_CreatedDate` found in the new-counters file itself, so every counter in that file becomes "New"; a `"YYYY-MM-DD"` string sets a fixed cutoff instead; `None` disables the split, everyone "Old"), the Division Trend tab's intended window (`TREND_START_MONTH`/`TREND_END_MONTH`, currently Apr 2023 – Jul 2026), and the full 57-column `EXPECTED_COLUMNS` list used to detect schema drift. Change behavior by editing values here, not logic elsewhere. |
 | `db.py` | ✅ exists | The only module that reads `data/` directly. Discovers order files by regex-parsing the real naming convention (`parse_period_from_filename`, with a `file_periods.csv` manual override), reads `.xlsx`/`.xlsb`/`.csv` (`_read_one_file`), strips stray whitespace from every string column (`strip_string_columns` — different export batches format cells differently), dedupes rows that appear identically across overlapping files while loudly flagging genuine value conflicts instead of guessing (`load_order_lines`), and loads the three reference files (new-products list, brand master, new-counters log) with the same "never silently drop data" discipline. Every file-read failure, schema mismatch, or data-quality issue anywhere in this module goes through `report_issue(severity, message)`, which both prints immediately and appends to the module-level `BUILD_ISSUES` list that ends up in the dashboard's red error banner. |
-| `build_report_data.py` | ✅ exists | The one script you actually run (`python build_report_data.py`, no arguments). Calls `db.py` for data, classifies every row Valid/Excluded/Unclassified (whitespace/case-normalized status matching), computes derived columns (discount math, discount buckets, canonical transaction date, `Item_Description`/`Division_Name` canonicalization to fix casing-drift SKU-splitting), resolves the New/Old counter cutoff (`resolve_counter_age_cutoff()` — handles the `"auto"` config mode), joins Brand and Counter_Age, aggregates into the three tabs' shapes, and writes `output/report_data.json` — then embeds that same JSON into `dashboard.html` so it also works opened directly via `file://`. Also computes a **per-file breakdown** (`per_file_summary` in the JSON meta, and printed during the build) — total/valid/excluded/unclassified/undated-valid row counts for every source file, with a `<-- mostly/all unclassified` flag on any file where over 90% of its rows are unclassified. This turns "why does file X have no data" from a guessing game into reading one table; it's what caught two real files with a shifted header row during this project. Rows with a discount outside 0–100% are excluded from the two bucketed tabs and reported as a warning, not silently dropped. Prints a timed progress line per pipeline stage (`stage()` context manager) so a long run never looks stuck. |
-| `verify_data.py` | ✅ exists | Independent verification tool — deliberately does NOT import `build_report_data.py`'s classification/date/dedup logic; everything is reimplemented from scratch here so it's a real cross-check, not a tautology. Five checks, each wrapped so one crashing doesn't stop the others (`run_check`), with everything printed also saved to `output/verification_report.txt` (`log()`) so there's one pasteable file to hand back for diagnosis: **Part 0** confirms every single file discovered in `data/` — every order file (including 0-row placeholders) and all three reference files — actually opens, with row counts and column-mismatch flags (the only check guaranteed to mention every file by name; Parts A/B only see files that produced a sampled row). **Part D** checks period coverage purely from the discovered files' own declared filename periods (not the built report) — any month in the intended trend window with no file covering it, and any files with overlapping declared periods. **Part A** does row-level arithmetic sanity checks (`PTR × discounts × Qty ≈ Amount`, skipping `FixedPrice`-overridden rows) on random rows per file. **Part B** independently recomputes per-SKU-per-FY totals from raw data and reconciles them against `report_data.json`'s `division_tab`, catching bugs anywhere in the real pipeline (join, dedup, status filtering, aggregation). **Part C** pulls `report_data.json`'s own `meta.build_issues` into the same report. A final **SUMMARY** block tallies issue counts from every part into one scannable table (with a `<--` marker on any non-zero row) so "what's actually wrong with `data/` right now" has a one-glance answer instead of requiring a read-through of all five parts. Run with `python verify_data.py [--sample-size 100] [--seed 42]`; requires `report_data.json` to already exist. |
+| `build_report_data.py` | ✅ exists | The one script you actually run (`python build_report_data.py`, no arguments). Calls `db.py` for data, classifies every row Valid/Excluded/Unclassified (whitespace/case-normalized status matching), computes derived columns (discount math, discount buckets, canonical transaction date, `Item_Description`/`Division_Name` canonicalization to fix casing-drift SKU-splitting), resolves the New/Old counter cutoff (`resolve_counter_age_cutoff()` — handles the `"auto"` config mode), joins Brand and Counter_Age, aggregates into the three tabs' shapes, and writes `output/report_data.json` — then embeds that same JSON into `dashboard.html` so it also works opened directly via `file://`. Also computes a **per-file breakdown** (`per_file_summary` in the JSON meta, and printed during the build) — total/valid/excluded/unclassified/undated-valid row counts for every source file, with a `<-- mostly/all unclassified` flag on any file where over 90% of its rows are unclassified. This turns "why does file X have no data" from a guessing game into reading one table; it's what caught two real files with a shifted header row during this project. Rows with a discount outside 0–100% are excluded from the two bucketed tabs and reported as a warning, not silently dropped. Also reports **reference-file match coverage**: of the SKUs on the new-products list and the counters on the new-counters list, how many actually appear in real valid order rows vs. how many never match anything (`new_product_skus_matched`/`unmatched`, `new_counters_matched_to_orders` in the JSON meta, plus a build warning when the unmatched count is nonzero) — catches a join silently connecting to almost nothing (wrong file, wrong column, formatting drift) instead of just trusting the join ran without error. Division Trend also clips to `TREND_START_MONTH`..`TREND_END_MONTH`, excluding (and reporting) any row dated outside that window, so a stray pre-launch date can't fabricate a fake extra period on the chart. Prints a timed progress line per pipeline stage (`stage()` context manager) so a long run never looks stuck. |
+| `verify_data.py` | ✅ exists | Independent verification tool — deliberately does NOT import `build_report_data.py`'s classification/date/dedup logic; everything is reimplemented from scratch here so it's a real cross-check, not a tautology. Seven checks, each wrapped so one crashing doesn't stop the others (`run_check`), with everything printed also saved to `output/verification_report.txt` (`log()`) so there's one pasteable file to hand back for diagnosis: **Part 0** confirms every single file discovered in `data/` — every order file (including 0-row placeholders) and all three reference files — actually opens, with row counts and column-mismatch flags (the only check guaranteed to mention every file by name; Parts A/B only see files that produced a sampled row). **Part D** checks period coverage purely from the discovered files' own declared filename periods (not the built report) — any month in the intended trend window with no file covering it, and any files with overlapping declared periods. **Part E** checks that all order files agree on the columns the pipeline actually reads (dates, discount math, status, join keys), independent of Part 0's full-schema check. **Part A** does row-level arithmetic sanity checks (`PTR × discounts × Qty ≈ Amount`, skipping `FixedPrice`-overridden rows) on random rows per file. **Part B** independently recomputes per-SKU-per-FY totals from raw data and reconciles them against `report_data.json`'s `division_tab`, catching bugs anywhere in the real pipeline (join, dedup, status filtering, aggregation). **Part C** pulls `report_data.json`'s own `meta.build_issues` into the same report. **Part F** independently recomputes how many new-product SKUs and how many registered counters actually appear in real valid order rows, then compares that against what `report_data.json` self-reports for the same two numbers — a genuine cross-check of the build's own reference-file matching logic (`db.new_product_sku_set` / `db.join_counter_age`), not just a restatement of it. A final **SUMMARY** block tallies issue counts from every part into one scannable table (with a `<--` marker on any non-zero row) so "what's actually wrong with `data/` right now" has a one-glance answer instead of requiring a read-through of all seven parts. Run with `python verify_data.py [--sample-size 100] [--seed 42]`; requires `report_data.json` to already exist. |
 
 ### `output/` — generated, safe to delete
 
@@ -61,10 +61,12 @@ since both are always generated fresh from the layers below them.
 
 1. **Discount Dispersion tab** (`panel-counter` in the HTML, tab id `counter` for historical
    reasons) — sales value bucketed into 9 discount ranges (`config.DISCOUNT_BUCKET_LABELS`).
-   Filters: **Counter Age** (Old/New checkboxes), **Discount Filter** (DiscountOnPTR-only vs.
-   compounded Total Discount — two independent bucket sets, never combined), **Group table by**
-   (SKU or Division — no Brand option here, see below), and a **Division** checklist with
-   Select all/Deselect all. Table has its own text filter and shows top 50 by total sales.
+   Filters: **Counter Age** (a 3-way exclusive All/Old/New radio, not independent checkboxes —
+   "All" shows both), **Discount Filter** (DiscountOnPTR-only vs. compounded Total Discount —
+   two independent bucket sets, never combined), **Group table by** (SKU or Division — no Brand
+   option here, see below), **Show FY** (filter to one financial year or all), and a
+   **Division** checklist with Select all/Deselect all (collapsed by default). Table has its own
+   text filter and shows top 50 by total sales, with click-to-expand "% of row total" per cell.
 
    **New/Old resolved at build time, not live in the browser.** A live in-browser cutoff-date
    picker was tried first and abandoned: at real data scale (1.4M+ rows), shipping one JSON
@@ -74,24 +76,50 @@ since both are always generated fresh from the layers below them.
    default `"auto"` — earliest date in the new-counters file), `db.join_counter_age()` computes
    a single `Counter_Age` ("Old"/"New") column from that resolved date, and only that 2-value
    column ships in the JSON. To change the cutoff: edit `config.py` and rerun
-   `build_report_data.py` (a rebuild takes seconds, so this isn't a meaningful loss of
-   flexibility). The dashboard's Data Notes banner always shows the actual resolved date used
-   (`meta.counter_age_cutoff_date`), not the literal word `"auto"`, so it's never ambiguous
-   what cutoff produced the numbers on screen.
+   `build_report_data.py`. The dashboard's Data Notes banner always shows the actual resolved
+   date used (`meta.counter_age_cutoff_date`), not the literal word `"auto"`.
 
 2. **Division Trend tab** — Medvol % (`sum(Amount)/sum(PTR×Quantity)`) and Net Sales %
-   (`sum(InvoiceAmount)/sum(PTR×Quantity)`) over time, both shown alongside their underlying
-   actual values (Amount, Invoice Amount, Gross Sales), not just the percentage. Drillable at
+   (`sum(InvoiceAmount)/sum(PTR×Quantity)`), shown as table columns alongside their underlying
+   actual values (Amount, Invoice Amount, Gross Sales) — **no chart**, tables only (the line
+   chart was removed per explicit request; `renderLineChart`/`LINE_COLORS` were deleted as dead
+   code along with it, and the now-pointless Metric radio that only drove the chart went too,
+   since both percentages are always shown as separate columns regardless). Drillable at
    **Division / Brand / SKU** level — this is the only tab with a Brand option, since
-   `brand_master.csv` is only relevant here. Defaults to **Financial Year** view (Apr–Mar, FY
-   label = the year it ends in) with a toggle to raw Month view; entity list defaults to top 5
-   by sales with Select all/Deselect all. Two tables: totals across the shown period, and a
-   per-period breakdown (both actual values + %), the latter with its own text filter.
+   `brand_master.csv` is only relevant here. **View by** toggles Financial Year (Apr–Mar) vs.
+   raw Month granularity for the period-breakdown table; **Show FY** separately filters both
+   tables down to one specific financial year or all of them. Entity list defaults to top 5 by
+   sales, collapsed by default. Two tables: totals across the shown period, and a per-period
+   breakdown (both actual values + %, click-to-expand on rows), the latter with its own text
+   filter. Also clips to `config.TREND_START_MONTH`..`TREND_END_MONTH` at build time — a stray
+   pre-launch transaction date can't fabricate a fake extra period (e.g. FY23 when the business
+   started in FY24).
 
 3. **NP Discounts tab** — same 9 discount buckets as Tab 1, filtered to SKUs on the new-products
    list (`item_brand_mapping.csv` — repurposed as a new-products list, not a general catalog).
    **SKU level only** — no Division/Brand grouping option, per explicit instruction. Same
-   DiscountOnPTR-only vs. Total Discount toggle as Tab 1.
+   DiscountOnPTR-only vs. Total Discount toggle as Tab 1, plus the same **Show FY** filter and
+   collapsed Division checklist.
+
+**FY is now available dataset-wide, not just in Division Trend.** `counter_tab` and
+`np_discounts_tab` records each carry an `fy` field (`build_report_data.compute_fy_label()` —
+same FY24=Apr2023-Mar2024 convention as the JS `fyLabel()` and `verify_data.py`'s
+`independent_fy()`, undated rows get `"Unknown"` rather than being silently dropped or
+crashing). This adds a `_fy` dimension to those two tabs' groupings — safe at real scale
+because FY only has ~5 distinct values (FY24-FY27 + Unknown), unlike the per-counter or
+per-day cardinality that caused the original 300k-record crash.
+
+**All four data tables have sortable column headers** — click any header to sort by that
+column (bucket amount, Amount, Invoice Amount, Gross Sales, Medvol %, Net Sales %, Period,
+entity name), click again to reverse direction. Shared machinery: `attachSortableHeaders()` +
+per-table module-level sort state (`counterTableSort`, `npTableSort`, `divisionTotalsSort`,
+`divisionPeriodSort`) + a comparator (`compareDivisionRows` for the two Division tables,
+inline `bucketSortValue` comparison for the two bucket tables) with a stable tiebreaker so
+equal values don't jumble into arbitrary order. These sort-state variables are declared at the
+very top of the script, before `init()` runs — a fourth recurrence of the TDZ bug this project
+keeps hitting (`let`/`const` declared after the point `init()` synchronously executes throws
+"Cannot access before initialization"); do a full `^(let|const) ` sweep after adding any new
+top-level state to confirm it's above the `embedded`/`init()` call.
 
 **Brand is deliberately absent from Tabs 1 and 3** — `brand_master.csv` only feeds the Division
 Trend tab's Brand drill-down; the other two tabs' JSON payloads (`counter_tab`,

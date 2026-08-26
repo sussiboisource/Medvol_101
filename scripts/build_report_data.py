@@ -89,6 +89,16 @@ def compute_canonical_date(df):
     return primary.fillna(fallback)
 
 
+def compute_fy_label(txn_date):
+    """FY24 = Apr 2023 - Mar 2024 (label = the calendar year the FY *ends* in). Same convention
+    used in dashboard.html's fyLabel() JS function and verify_data.py's independent_fy() --
+    keep all three in sync if this ever changes. Rows with no parseable date get "Unknown"
+    rather than being silently dropped or crashing on NaT."""
+    fy_end_year = (txn_date.dt.year + (txn_date.dt.month >= 4).astype("Int64")).astype("Int64")
+    labels = "FY" + (fy_end_year % 100).astype("Int64").astype(str).str.zfill(2)
+    return labels.where(txn_date.notna(), "Unknown")
+
+
 def canonicalize_labels(df):
     """The same Item_Code can carry slightly different Item_Description/Division_Name text
     across export batches (casing drift, e.g. "Ketorol DT" vs "Ketorol Dt"). Without this, the
@@ -120,6 +130,7 @@ def add_derived_columns(df):
 
     df["_status_class"] = df["Order_Status"].apply(classify_status)
     df["_txn_date"] = compute_canonical_date(df)
+    df["_fy"] = compute_fy_label(df["_txn_date"])
 
     df["_ptr"] = to_numeric(df["PTR"], fill_value=0.0)
     df["_quantity"] = to_numeric(df["Quantity"], fill_value=0.0)
@@ -145,14 +156,15 @@ def add_derived_columns(df):
 
 
 def build_counter_tab(valid_df):
-    """Grain: Counter_Age x SKU x discount bucket. Counter_Age is pre-computed once at build
-    time (config.COUNTER_AGE_CUTOFF_DATE) -- per-counter (Doctor_Code) granularity was tried
-    and abandoned: at real data scale it produced 300k+ JSON records and made the dashboard
-    unusable. Only 2 age values instead of thousands of counters keeps this small."""
+    """Grain: Counter_Age x FY x SKU x discount bucket. Counter_Age is pre-computed once at
+    build time (config.COUNTER_AGE_CUTOFF_DATE) -- per-counter (Doctor_Code) granularity was
+    tried and abandoned: at real data scale it produced 300k+ JSON records and made the
+    dashboard unusable. FY is safe to add on top of that (only ~5 distinct values -- FY24-FY27
+    plus "Unknown" for undated rows -- vs. thousands of individual counters)."""
     # Brand is deliberately excluded here -- only the Division Trend tab needs it. Fewer
     # group-by columns also means fewer distinct records, which matters at real data scale.
     records = []
-    group_cols = ["Counter_Age", config.SKU_ID_COLUMN, "Item_Description", "Division_Name"]
+    group_cols = ["Counter_Age", "_fy", config.SKU_ID_COLUMN, "Item_Description", "Division_Name"]
 
     for bucket_col, discount_type in (("_bucket_ptr_only", "ptr_only"), ("_bucket_total", "total")):
         grouped = (
@@ -167,6 +179,7 @@ def build_counter_tab(valid_df):
     return [
         {
             "counter_age": r["Counter_Age"],
+            "fy": r["_fy"],
             "item_code": r[config.SKU_ID_COLUMN],
             "item_description": r["Item_Description"],
             "division": r["Division_Name"],
@@ -184,7 +197,7 @@ def build_np_discounts_tab(valid_df, new_product_skus):
     (item_brand_mapping.csv), at SKU level. No Brand -- see build_counter_tab."""
     df = valid_df[valid_df[config.SKU_ID_COLUMN].isin(new_product_skus)]
     records = []
-    group_cols = [config.SKU_ID_COLUMN, "Item_Description", "Division_Name"]
+    group_cols = ["_fy", config.SKU_ID_COLUMN, "Item_Description", "Division_Name"]
 
     for bucket_col, discount_type in (("_bucket_ptr_only", "ptr_only"), ("_bucket_total", "total")):
         grouped = (
@@ -198,6 +211,7 @@ def build_np_discounts_tab(valid_df, new_product_skus):
 
     return [
         {
+            "fy": r["_fy"],
             "item_code": r[config.SKU_ID_COLUMN],
             "item_description": r["Item_Description"],
             "division": r["Division_Name"],
@@ -396,6 +410,38 @@ def main():
 
         new_product_skus = db.new_product_sku_set(new_products_df)
 
+        # Match-coverage checks for both reference-file joins -- catches the exact class of
+        # problem this project has hit before (wrong file, wrong column, formatting drift):
+        # the join runs without error, but silently connects to almost nothing real.
+        valid_skus_present = set(valid_df[config.SKU_ID_COLUMN].dropna())
+        new_product_skus_matched = len(new_product_skus & valid_skus_present)
+        new_product_skus_unmatched = len(new_product_skus) - new_product_skus_matched
+        if new_product_skus_unmatched:
+            db.report_issue(
+                "warning",
+                f"{new_product_skus_unmatched:,}/{len(new_product_skus):,} SKUs on the new-products "
+                f"list (item_brand_mapping.csv) have NO matching valid order rows -- either they "
+                f"genuinely haven't sold yet, or the SKU codes don't match Item_Code in the order "
+                f"data (check for formatting drift)."
+            )
+
+        new_counters_registered_total = 0
+        new_counters_matched_to_orders = 0
+        if new_counters_df is not None and not new_counters_df.empty:
+            registered_counter_codes = set(new_counters_df[config.NEW_COUNTERS_ID_COLUMN].dropna())
+            valid_counter_codes_present = set(valid_df[config.COUNTER_ID_COLUMN].dropna())
+            new_counters_registered_total = len(registered_counter_codes)
+            new_counters_matched_to_orders = len(registered_counter_codes & valid_counter_codes_present)
+            new_counters_unmatched = new_counters_registered_total - new_counters_matched_to_orders
+            if new_counters_unmatched:
+                db.report_issue(
+                    "warning",
+                    f"{new_counters_unmatched:,}/{new_counters_registered_total:,} counters on the "
+                    f"new-counters list (Allocated_CounterCode) have NO matching valid order rows -- "
+                    f"either they genuinely haven't ordered yet, or the counter codes don't match "
+                    f"Doctor_Code in the order data (check for formatting drift)."
+                )
+
     if unclassified_status_counts:
         print(f"  Unclassified Order_Status breakdown ({sum(unclassified_status_counts.values()):,} rows total):", flush=True)
         for status, count in sorted(unclassified_status_counts.items(), key=lambda kv: -kv[1])[:20]:
@@ -438,10 +484,14 @@ def main():
             "new_products_files": new_products_meta["new_products_files"],
             "duplicate_new_product_codes": new_products_meta["duplicate_new_product_codes"],
             "new_product_sku_count": len(new_product_skus),
+            "new_product_skus_matched": new_product_skus_matched,
+            "new_product_skus_unmatched": new_product_skus_unmatched,
             "brand_master_file_present": brand_master_meta["brand_master_file_present"],
             "duplicate_brand_master_codes": brand_master_meta["duplicate_brand_master_codes"],
             "new_counters_file_present": new_counters_meta["new_counters_file_present"],
             "duplicate_counter_codes": new_counters_meta["duplicate_counter_codes"],
+            "new_counters_registered_total": new_counters_registered_total,
+            "new_counters_matched_to_orders": new_counters_matched_to_orders,
             "counter_age_cutoff_date": cutoff_date,
             "new_counter_valid_rows": new_counter_rows,
             "trend_window": {"start": config.TREND_START_MONTH, "end": config.TREND_END_MONTH},
@@ -474,7 +524,9 @@ def main():
     print(f"  counter_tab records: {len(counter_tab):,}")
     print(f"  division_tab records: {len(division_tab):,}")
     print(f"  np_discounts_tab records: {len(np_discounts_tab):,} (from {len(new_product_skus)} new-product SKUs)")
+    print(f"    -- {new_product_skus_matched:,}/{len(new_product_skus):,} new-product SKUs matched to real valid order rows")
     print(f"  counter age cutoff: {cutoff_date!r} (config: {config.COUNTER_AGE_CUTOFF_DATE!r}) -- {new_counter_rows:,} valid rows classified 'New'")
+    print(f"    -- {new_counters_matched_to_orders:,}/{new_counters_registered_total:,} registered counters matched to real valid order rows")
 
 
 if __name__ == "__main__":

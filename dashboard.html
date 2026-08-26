@@ -45,6 +45,8 @@
   th, td { padding: 6px 8px; text-align: right; border-bottom: 1px solid var(--border); white-space: nowrap; }
   th:first-child, td:first-child { text-align: left; }
   thead th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; }
+  th.sortable-header { cursor: pointer; user-select: none; }
+  th.sortable-header:hover { color: var(--accent); }
   tbody tr:hover { background: #f2f4f7; }
   tr.clickable-row { cursor: pointer; }
   .cell-pct { display: none; font-size: 10px; color: var(--muted); margin-top: 1px; }
@@ -73,9 +75,6 @@
   svg text { font-family: inherit; }
   .axis-label { fill: var(--muted); font-size: 10.5px; }
   .bar-value { fill: var(--text); font-size: 10px; }
-  .legend { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 8px; font-size: 12px; }
-  .legend-item { display: flex; align-items: center; gap: 6px; }
-  .legend-swatch { width: 10px; height: 10px; border-radius: 2px; }
   .table-filter {
     display: block; width: 100%; max-width: 320px; margin: 0 0 12px; padding: 6px 10px;
     border: 1px solid var(--border); border-radius: 6px; font-size: 13px; background: var(--panel);
@@ -109,9 +108,10 @@
   <div class="controls">
     <div class="control-group">
       <label class="group-label">Counter Age</label>
-      <div class="checkbox-row">
-        <label><input type="checkbox" id="age-old" checked> Old</label>
-        <label><input type="checkbox" id="age-new" checked> New</label>
+      <div class="radio-row">
+        <label><input type="radio" name="counter-age" value="all" checked> All</label>
+        <label><input type="radio" name="counter-age" value="Old"> Old</label>
+        <label><input type="radio" name="counter-age" value="New"> New</label>
       </div>
     </div>
     <div class="control-group">
@@ -126,6 +126,12 @@
       <select id="counter-group-by">
         <option value="item_code">SKU</option>
         <option value="division">Division</option>
+      </select>
+    </div>
+    <div class="control-group">
+      <label class="group-label">Show FY</label>
+      <select id="counter-fy-filter">
+        <option value="all">All FYs</option>
       </select>
     </div>
     <div class="control-group">
@@ -170,11 +176,10 @@
       </select>
     </div>
     <div class="control-group">
-      <label class="group-label">Metric</label>
-      <div class="radio-row">
-        <label><input type="radio" name="division-metric" value="medvol" checked> Medvol % (Amount / Gross)</label>
-        <label><input type="radio" name="division-metric" value="net_sales"> Net Sales % (Invoice / Gross)</label>
-      </div>
+      <label class="group-label">Show FY</label>
+      <select id="division-fy-filter">
+        <option value="all">All FYs</option>
+      </select>
     </div>
     <div class="control-group">
       <details class="entity-details">
@@ -189,9 +194,6 @@
   </div>
 
   <div class="panel-box">
-    <p class="panel-title" id="division-chart-title">% over time</p>
-    <div id="division-line-chart"></div>
-    <div class="legend" id="division-legend"></div>
     <p class="totals-table-title">Totals across the shown period (actual value + %)</p>
     <div id="division-totals-table"></div>
     <p class="totals-table-title">Breakdown by period (actual value + %)</p>
@@ -208,6 +210,12 @@
         <label><input type="radio" name="np-discount-type" value="ptr_only" checked> DiscountOnPTR only</label>
         <label><input type="radio" name="np-discount-type" value="total"> Total discount (PTR + Cash)</label>
       </div>
+    </div>
+    <div class="control-group">
+      <label class="group-label">Show FY</label>
+      <select id="np-fy-filter">
+        <option value="all">All FYs</option>
+      </select>
     </div>
     <div class="control-group">
       <details class="entity-details">
@@ -236,7 +244,6 @@
 <div id="meta-banner-slot"></div>
 
 <script>
-const LINE_COLORS = ['var(--line1)', 'var(--line2)', 'var(--line3)', 'var(--line4)', 'var(--line5)'];
 const BUCKET_ORDER = ["<5%", "5-15%", "15-25%", "25-35%", "35-45%", "45-55%", "55-65%", "65-80%", ">80%"];
 const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
@@ -247,6 +254,10 @@ let divisionPeriodRows = [];
 let counterByEntity = {};
 let counterGroupLabel = 'SKU';
 let npByEntity = {};
+let counterTableSort = { column: 'total', direction: 'desc' };
+let npTableSort = { column: 'total', direction: 'desc' };
+let divisionTotalsSort = { column: 'amount', direction: 'desc' };
+let divisionPeriodSort = { column: 'period', direction: 'asc' };
 
 const embedded = document.getElementById('report-data');
 if (embedded && embedded.textContent.trim()) {
@@ -274,15 +285,17 @@ function init() {
     });
   });
 
-  ['age-old', 'age-new'].forEach(id => document.getElementById(id).addEventListener('change', renderCounterTab));
+  document.querySelectorAll('input[name="counter-age"]').forEach(el => el.addEventListener('change', renderCounterTab));
   document.querySelectorAll('input[name="discount-type"]').forEach(el => el.addEventListener('change', renderCounterTab));
   document.getElementById('counter-group-by').addEventListener('change', renderCounterTab);
+  document.getElementById('counter-fy-filter').addEventListener('change', renderCounterTab);
 
   document.getElementById('division-level').addEventListener('change', () => { populateDivisionEntities(); renderDivisionTab(); });
   document.getElementById('division-period-mode').addEventListener('change', renderDivisionTab);
-  document.querySelectorAll('input[name="division-metric"]').forEach(el => el.addEventListener('change', renderDivisionTab));
+  document.getElementById('division-fy-filter').addEventListener('change', renderDivisionTab);
 
   document.querySelectorAll('input[name="np-discount-type"]').forEach(el => el.addEventListener('change', renderNpTab));
+  document.getElementById('np-fy-filter').addEventListener('change', renderNpTab);
 
   document.getElementById('counter-table-filter').addEventListener('input', renderFilteredCounterTable);
   document.getElementById('np-table-filter').addEventListener('input', renderFilteredNpTable);
@@ -293,10 +306,13 @@ function init() {
   setUpSelectAll('np-division-select-all', 'np-division-select-none', '.np-division-checkbox', renderNpTab);
 
   populateCounterDivisionFilter();
+  populateFyOptions('counter-fy-filter', REPORT.counter_tab);
   renderCounterTab();
   populateDivisionEntities();
+  populateDivisionFyOptions();
   renderDivisionTab();
   populateNpDivisionFilter();
+  populateFyOptions('np-fy-filter', REPORT.np_discounts_tab);
   renderNpTab();
 }
 
@@ -360,6 +376,15 @@ function renderMetaBanner() {
   document.getElementById('meta-banner-slot').appendChild(el);
 }
 
+function populateFyOptions(selectId, records) {
+  const fys = Array.from(new Set(records.map(r => r.fy))).filter(f => f && f !== 'Unknown').sort();
+  const hasUnknown = records.some(r => r.fy === 'Unknown');
+  const select = document.getElementById(selectId);
+  select.innerHTML = '<option value="all">All FYs</option>' +
+    fys.map(fy => '<option value="' + fy + '">' + fy + '</option>').join('') +
+    (hasUnknown ? '<option value="Unknown">Unknown (no date)</option>' : '');
+}
+
 // ---------- Counter tab ----------
 
 function populateCounterDivisionFilter() {
@@ -372,19 +397,20 @@ function populateCounterDivisionFilter() {
 }
 
 function getCounterFilters() {
-  const ages = [];
-  if (document.getElementById('age-old').checked) ages.push('Old');
-  if (document.getElementById('age-new').checked) ages.push('New');
+  const ageChoice = document.querySelector('input[name="counter-age"]:checked').value;
+  const ages = ageChoice === 'all' ? ['Old', 'New'] : [ageChoice];
   const discountType = document.querySelector('input[name="discount-type"]:checked').value;
   const groupBy = document.getElementById('counter-group-by').value;
+  const fy = document.getElementById('counter-fy-filter').value;
   const divisions = Array.from(document.querySelectorAll('.counter-division-checkbox:checked')).map(cb => cb.value);
-  return { ages, discountType, groupBy, divisions };
+  return { ages, discountType, groupBy, fy, divisions };
 }
 
 function renderCounterTab() {
-  const { ages, discountType, groupBy, divisions } = getCounterFilters();
+  const { ages, discountType, groupBy, fy, divisions } = getCounterFilters();
   const rows = REPORT.counter_tab.filter(r =>
     ages.includes(r.counter_age) && r.discount_type === discountType
+    && (fy === 'all' || r.fy === fy)
     && divisions.includes(r.division)
   );
 
@@ -406,10 +432,43 @@ function renderCounterTab() {
   renderFilteredCounterTable();
 }
 
+function bucketSortValue(data, column) {
+  return column === 'total' ? data.total : (data.buckets[column] || 0);
+}
+
+function renderSortableBucketHeaderRow(firstColLabel, sortState) {
+  const cols = BUCKET_ORDER.concat(['Total']);
+  const cells = cols.map(col => {
+    const key = col === 'Total' ? 'total' : col;
+    const arrow = sortState.column === key ? (sortState.direction === 'desc' ? ' ▾' : ' ▴') : '';
+    return '<th class="sortable-header" data-sort-key="' + key + '" title="Click to sort by ' + col + '">' + col + arrow + '</th>';
+  }).join('');
+  return '<tr><th>' + firstColLabel + '</th>' + cells + '</tr>';
+}
+
+function attachSortableHeaders(container, sortState, rerenderFn) {
+  container.querySelectorAll('.sortable-header').forEach(th => {
+    th.addEventListener('click', () => {
+      const key = th.dataset.sortKey;
+      if (sortState.column === key) {
+        sortState.direction = sortState.direction === 'desc' ? 'asc' : 'desc';
+      } else {
+        sortState.column = key;
+        sortState.direction = 'desc';
+      }
+      rerenderFn();
+    });
+  });
+}
+
 function renderFilteredCounterTable() {
   const filterText = document.getElementById('counter-table-filter').value.trim().toLowerCase();
   const filtered = Object.entries(counterByEntity).filter(([name]) => name.toLowerCase().includes(filterText));
-  const sortedEntities = filtered.sort((a, b) => b[1].total - a[1].total).slice(0, 50);
+  const sortedEntities = filtered.sort((a, b) => {
+    const va = bucketSortValue(a[1], counterTableSort.column);
+    const vb = bucketSortValue(b[1], counterTableSort.column);
+    return counterTableSort.direction === 'desc' ? vb - va : va - vb;
+  }).slice(0, 50);
   renderCounterTable(sortedEntities, counterGroupLabel);
 }
 
@@ -438,12 +497,12 @@ function renderCounterTable(sortedEntities, groupLabel) {
     container.innerHTML = '<div class="empty-state">No data for this selection.</div>';
     return;
   }
-  let html = '<table><thead><tr><th>' + groupLabel + '</th>' +
-    BUCKET_ORDER.map(b => '<th>' + b + '</th>').join('') + '<th>Total</th></tr></thead><tbody>' +
+  let html = '<table><thead>' + renderSortableBucketHeaderRow(groupLabel, counterTableSort) + '</thead><tbody>' +
     renderBucketTableRows(sortedEntities) + '</tbody></table>';
-  if (sortedEntities.length === 50) html += '<div class="empty-state">Showing top 50 by total sales.</div>';
+  if (sortedEntities.length === 50) html += '<div class="empty-state">Showing top 50 by ' + counterTableSort.column + ' (' + counterTableSort.direction + 'ending).</div>';
   container.innerHTML = html;
   attachRowExpandToggle(container);
+  attachSortableHeaders(container, counterTableSort, renderFilteredCounterTable);
 }
 
 // ---------- NP Discounts tab ----------
@@ -459,8 +518,11 @@ function populateNpDivisionFilter() {
 
 function renderNpTab() {
   const discountType = document.querySelector('input[name="np-discount-type"]:checked').value;
+  const fy = document.getElementById('np-fy-filter').value;
   const divisions = Array.from(document.querySelectorAll('.np-division-checkbox:checked')).map(cb => cb.value);
-  const rows = REPORT.np_discounts_tab.filter(r => r.discount_type === discountType && divisions.includes(r.division));
+  const rows = REPORT.np_discounts_tab.filter(r =>
+    r.discount_type === discountType && (fy === 'all' || r.fy === fy) && divisions.includes(r.division)
+  );
 
   const bucketTotals = {};
   BUCKET_ORDER.forEach(b => bucketTotals[b] = 0);
@@ -480,7 +542,11 @@ function renderNpTab() {
 function renderFilteredNpTable() {
   const filterText = document.getElementById('np-table-filter').value.trim().toLowerCase();
   const filtered = Object.entries(npByEntity).filter(([name]) => name.toLowerCase().includes(filterText));
-  const sortedEntities = filtered.sort((a, b) => b[1].total - a[1].total).slice(0, 50);
+  const sortedEntities = filtered.sort((a, b) => {
+    const va = bucketSortValue(a[1], npTableSort.column);
+    const vb = bucketSortValue(b[1], npTableSort.column);
+    return npTableSort.direction === 'desc' ? vb - va : va - vb;
+  }).slice(0, 50);
   renderNpTable(sortedEntities);
 }
 
@@ -490,12 +556,12 @@ function renderNpTable(sortedEntities) {
     container.innerHTML = '<div class="empty-state">No new-product sales for this selection yet.</div>';
     return;
   }
-  let html = '<table><thead><tr><th>SKU</th>' +
-    BUCKET_ORDER.map(b => '<th>' + b + '</th>').join('') + '<th>Total</th></tr></thead><tbody>' +
+  let html = '<table><thead>' + renderSortableBucketHeaderRow('SKU', npTableSort) + '</thead><tbody>' +
     renderBucketTableRows(sortedEntities) + '</tbody></table>';
-  if (sortedEntities.length === 50) html += '<div class="empty-state">Showing top 50 by total sales.</div>';
+  if (sortedEntities.length === 50) html += '<div class="empty-state">Showing top 50 by ' + npTableSort.column + ' (' + npTableSort.direction + 'ending).</div>';
   container.innerHTML = html;
   attachRowExpandToggle(container);
+  attachSortableHeaders(container, npTableSort, renderFilteredNpTable);
 }
 
 // ---------- Division tab ----------
@@ -535,56 +601,56 @@ function fyLabel(monthStr) {
   return 'FY' + String(fyEndYear).slice(-2);
 }
 
+function populateDivisionFyOptions() {
+  const fys = Array.from(new Set(REPORT.division_tab.map(r => fyLabel(r.month)))).sort();
+  const select = document.getElementById('division-fy-filter');
+  select.innerHTML = '<option value="all">All FYs</option>' +
+    fys.map(fy => '<option value="' + fy + '">' + fy + '</option>').join('');
+}
+
 function renderDivisionTab() {
   const level = document.getElementById('division-level').value;
   const periodMode = document.getElementById('division-period-mode').value;
-  const metric = document.querySelector('input[name="division-metric"]:checked').value;
+  const fyFilter = document.getElementById('division-fy-filter').value;
   const selected = Array.from(document.querySelectorAll('.division-entity-checkbox:checked')).map(cb => cb.value);
 
-  const periodNoun = periodMode === 'fy' ? 'financial year' : 'month';
-  document.getElementById('division-chart-title').textContent =
-    (metric === 'medvol' ? 'Medvol %' : 'Net Sales %') + ' by ' + periodNoun + ', by ' + LEVEL_LABELS[level];
-
-  // period (month or FY label) -> entity -> {num, den}
-  const byPeriodEntity = {};
-  REPORT.division_tab.forEach(r => {
-    const key = r[level];
-    if (!selected.includes(key)) return;
-    const period = periodMode === 'fy' ? fyLabel(r.month) : r.month;
-    if (!byPeriodEntity[period]) byPeriodEntity[period] = {};
-    if (!byPeriodEntity[period][key]) byPeriodEntity[period][key] = { num: 0, den: 0 };
-    const num = metric === 'medvol' ? r.amount_sum : r.invoice_amount_sum;
-    byPeriodEntity[period][key].num += num;
-    byPeriodEntity[period][key].den += r.gross_sales_sum;
-  });
-
-  const periods = Object.keys(byPeriodEntity).sort();
-  const series = selected.map((key, i) => ({
-    name: key,
-    color: LINE_COLORS[i % LINE_COLORS.length],
-    points: periods.map(p => {
-      const cell = byPeriodEntity[p] && byPeriodEntity[p][key];
-      if (!cell || cell.den === 0) return null;
-      return { x: p, y: 100 * cell.num / cell.den };
-    }),
-  }));
-
-  renderLineChart(document.getElementById('division-line-chart'), periods, series);
-
-  const legend = document.getElementById('division-legend');
-  legend.innerHTML = series.map(s =>
-    '<div class="legend-item"><span class="legend-swatch" style="background:' + s.color + '"></span>' + escapeHtml(s.name) + '</div>'
-  ).join('');
-
-  renderDivisionTotalsTable(level, selected);
-  renderDivisionPeriodTable(level, periodMode, selected);
+  renderDivisionTotalsTable(level, selected, fyFilter);
+  renderDivisionPeriodTable(level, periodMode, selected, fyFilter);
 }
 
-function renderDivisionPeriodTable(level, periodMode, selected) {
+function divisionRowSortValue(row, column) {
+  if (column === 'medvol') return row.gross ? 100 * row.amount / row.gross : 0;
+  if (column === 'net_sales') return row.gross ? 100 * row.invoice / row.gross : 0;
+  return row[column];
+}
+
+function compareDivisionRows(a, b, sortState) {
+  const va = divisionRowSortValue(a, sortState.column);
+  const vb = divisionRowSortValue(b, sortState.column);
+  let cmp = typeof va === 'string' || typeof vb === 'string'
+    ? String(va).localeCompare(String(vb))
+    : va - vb;
+  if (sortState.direction === 'desc') cmp = -cmp;
+  if (cmp !== 0) return cmp;
+  // Tiebreaker keeps a stable, sensible default order (chronological/alphabetical) when the
+  // sort column has equal values, instead of leaving tied rows in an arbitrary order.
+  if (a.period !== undefined && a.period !== b.period) return a.period.localeCompare(b.period);
+  return String(a.key || '').localeCompare(String(b.key || ''));
+}
+
+function renderSortableDivisionHeader(cols, sortState) {
+  return '<tr>' + cols.map(([key, label]) => {
+    const arrow = sortState.column === key ? (sortState.direction === 'desc' ? ' ▾' : ' ▴') : '';
+    return '<th class="sortable-header" data-sort-key="' + key + '" title="Click to sort by ' + label + '">' + label + arrow + '</th>';
+  }).join('') + '</tr>';
+}
+
+function renderDivisionPeriodTable(level, periodMode, selected, fyFilter) {
   const byPeriodEntity = {};
   REPORT.division_tab.forEach(r => {
     const key = r[level];
     if (!selected.includes(key)) return;
+    if (fyFilter !== 'all' && fyLabel(r.month) !== fyFilter) return;
     const period = periodMode === 'fy' ? fyLabel(r.month) : r.month;
     const cellKey = period + '|' + key;
     if (!byPeriodEntity[cellKey]) byPeriodEntity[cellKey] = { period, key, amount: 0, invoice: 0, gross: 0 };
@@ -603,7 +669,9 @@ function renderDivisionPeriodTable(level, periodMode, selected) {
 function renderFilteredDivisionPeriodTable() {
   const level = window._divisionPeriodLevel || 'division';
   const filterText = document.getElementById('division-period-table-filter').value.trim().toLowerCase();
-  const rows = divisionPeriodRows.filter(r => r.key.toLowerCase().includes(filterText));
+  const rows = divisionPeriodRows
+    .filter(r => r.key.toLowerCase().includes(filterText))
+    .sort((a, b) => compareDivisionRows(a, b, divisionPeriodSort));
 
   const container = document.getElementById('division-period-table');
   if (!rows.length) {
@@ -611,8 +679,8 @@ function renderFilteredDivisionPeriodTable() {
     return;
   }
   const entityLabel = LEVEL_LABELS[level].charAt(0).toUpperCase() + LEVEL_LABELS[level].slice(1);
-  let html = '<table><thead><tr><th>Period</th><th>' + entityLabel +
-    '</th><th>Amount</th><th>Invoice Amount</th><th>Gross Sales</th><th>Medvol %</th><th>Net Sales %</th></tr></thead><tbody>';
+  const cols = [['period', 'Period'], ['key', entityLabel], ['amount', 'Amount'], ['invoice', 'Invoice Amount'], ['gross', 'Gross Sales'], ['medvol', 'Medvol %'], ['net_sales', 'Net Sales %']];
+  let html = '<table><thead>' + renderSortableDivisionHeader(cols, divisionPeriodSort) + '</thead><tbody>';
   rows.forEach(r => {
     const medvolPct = r.gross ? 100 * r.amount / r.gross : 0;
     const netSalesPct = r.gross ? 100 * r.invoice / r.gross : 0;
@@ -627,33 +695,36 @@ function renderFilteredDivisionPeriodTable() {
   html += '</tbody></table>';
   container.innerHTML = html;
   attachRowExpandToggle(container);
+  attachSortableHeaders(container, divisionPeriodSort, renderFilteredDivisionPeriodTable);
 }
 
-function renderDivisionTotalsTable(level, selected) {
+function renderDivisionTotalsTable(level, selected, fyFilter) {
   const totals = {};
   REPORT.division_tab.forEach(r => {
     const key = r[level];
     if (!selected.includes(key)) return;
-    if (!totals[key]) totals[key] = { amount: 0, invoice: 0, gross: 0 };
+    if (fyFilter !== 'all' && fyLabel(r.month) !== fyFilter) return;
+    if (!totals[key]) totals[key] = { key, amount: 0, invoice: 0, gross: 0 };
     totals[key].amount += r.amount_sum;
     totals[key].invoice += r.invoice_amount_sum;
     totals[key].gross += r.gross_sales_sum;
   });
 
   const container = document.getElementById('division-totals-table');
-  const rows = selected.filter(key => totals[key]).sort((a, b) => totals[b].amount - totals[a].amount);
+  const rows = selected.filter(key => totals[key]).map(key => totals[key])
+    .sort((a, b) => compareDivisionRows(a, b, divisionTotalsSort));
   if (!rows.length) {
     container.innerHTML = '<div class="empty-state">No data for this selection.</div>';
     return;
   }
-  let html = '<table><thead><tr><th>' + (LEVEL_LABELS[level].charAt(0).toUpperCase() + LEVEL_LABELS[level].slice(1)) +
-    '</th><th>Amount (Discounted Sales)</th><th>Invoice Amount</th><th>Gross Sales</th><th>Medvol %</th><th>Net Sales %</th></tr></thead><tbody>';
-  rows.forEach(key => {
-    const t = totals[key];
+  const entityLabel = LEVEL_LABELS[level].charAt(0).toUpperCase() + LEVEL_LABELS[level].slice(1);
+  const cols = [['key', entityLabel], ['amount', 'Amount (Discounted Sales)'], ['invoice', 'Invoice Amount'], ['gross', 'Gross Sales'], ['medvol', 'Medvol %'], ['net_sales', 'Net Sales %']];
+  let html = '<table><thead>' + renderSortableDivisionHeader(cols, divisionTotalsSort) + '</thead><tbody>';
+  rows.forEach(t => {
     const medvolPct = t.gross ? 100 * t.amount / t.gross : 0;
     const netSalesPct = t.gross ? 100 * t.invoice / t.gross : 0;
     html += '<tr class="clickable-row" title="Click to show % of gross under each value">' +
-      '<td>' + escapeHtml(key) + '</td>' +
+      '<td>' + escapeHtml(t.key) + '</td>' +
       '<td><div class="cell-value">' + formatMoney(t.amount) + '</div><div class="cell-pct">' + medvolPct.toFixed(1) + '% of gross</div></td>' +
       '<td><div class="cell-value">' + formatMoney(t.invoice) + '</div><div class="cell-pct">' + netSalesPct.toFixed(1) + '% of gross</div></td>' +
       '<td>' + formatMoney(t.gross) + '</td>' +
@@ -663,6 +734,7 @@ function renderDivisionTotalsTable(level, selected) {
   html += '</tbody></table>';
   container.innerHTML = html;
   attachRowExpandToggle(container);
+  attachSortableHeaders(container, divisionTotalsSort, () => renderDivisionTotalsTable(level, selected, fyFilter));
 }
 
 // ---------- tiny SVG chart helpers ----------
@@ -692,61 +764,6 @@ function renderBarChart(container, categories, values) {
   container.innerHTML = `<svg viewBox="0 0 ${width} ${height}" style="width:100%;height:auto;">
     <line x1="${padL}" y1="${padT + chartH}" x2="${width - padR}" y2="${padT + chartH}" stroke="var(--border)"></line>
     ${bars}
-  </svg>`;
-}
-
-function renderLineChart(container, months, series) {
-  const anyPoints = series.some(s => s.points.some(p => p !== null));
-  if (!months.length || !anyPoints) {
-    container.innerHTML = '<div class="empty-state">No data for this selection.</div>';
-    return;
-  }
-  const width = 900, height = 300, padL = 50, padB = 50, padT = 16, padR = 16;
-  const chartW = width - padL - padR, chartH = height - padT - padB;
-
-  const allY = series.flatMap(s => s.points.filter(p => p !== null).map(p => p.y));
-  const maxY = Math.max(...allY, 10) * 1.1;
-  const minY = Math.min(0, ...allY);
-  const xStep = months.length > 1 ? chartW / (months.length - 1) : 0;
-
-  const xFor = i => padL + i * xStep;
-  const yFor = v => padT + chartH - ((v - minY) / (maxY - minY || 1)) * chartH;
-
-  let lines = '';
-  series.forEach(s => {
-    let d = '';
-    s.points.forEach((p, i) => {
-      if (p === null) return;
-      const cmd = d === '' ? 'M' : 'L';
-      d += `${cmd}${xFor(i)},${yFor(p.y)} `;
-    });
-    if (d) lines += `<path d="${d.trim()}" fill="none" stroke="${s.color}" stroke-width="2"></path>`;
-    s.points.forEach((p, i) => {
-      if (p === null) return;
-      lines += `<circle cx="${xFor(i)}" cy="${yFor(p.y)}" r="2.5" fill="${s.color}"></circle>`;
-    });
-  });
-
-  const labelEvery = Math.max(1, Math.ceil(months.length / 12));
-  let xLabels = '';
-  months.forEach((m, i) => {
-    if (i % labelEvery !== 0) return;
-    xLabels += `<text class="axis-label" x="${xFor(i)}" y="${height - padB + 16}" text-anchor="middle">${m}</text>`;
-  });
-
-  const gridLines = 4;
-  let yGrid = '';
-  for (let g = 0; g <= gridLines; g++) {
-    const val = minY + (g / gridLines) * (maxY - minY);
-    const y = yFor(val);
-    yGrid += `<line x1="${padL}" y1="${y}" x2="${width - padR}" y2="${y}" stroke="var(--border)" stroke-dasharray="2,3"></line>`;
-    yGrid += `<text class="axis-label" x="${padL - 8}" y="${y + 3}" text-anchor="end">${val.toFixed(0)}%</text>`;
-  }
-
-  container.innerHTML = `<svg viewBox="0 0 ${width} ${height}" style="width:100%;height:auto;">
-    ${yGrid}
-    ${lines}
-    ${xLabels}
   </svg>`;
 }
 

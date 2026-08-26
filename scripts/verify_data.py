@@ -31,10 +31,15 @@ diagnosis instead of copying partial/stale terminal scrollback:
   C. Build-time issues: pulls report_data.json's own meta.build_issues (files that failed to
      read, severe schema mismatches, etc. -- see db.py's report_issue) into this same report,
      so build-time and verification-time findings live in one place.
+  F. Reference-file match coverage: independently recomputes how many new-product SKUs
+     (item_brand_mapping.csv) and how many registered counters (Allocated_CounterCode) actually
+     appear in real valid order rows, then compares that independent count against what
+     report_data.json itself self-reports -- catching a bug in the build's own matching logic,
+     not just re-confirming it.
 
 A final SUMMARY block (counts only, backed by the detail in the parts above) prints at the end,
 so "what's actually wrong with data/ right now" is answerable in one glance instead of reading
-through five sections of detail.
+through six sections of detail.
 
 Usage: python verify_data.py [--sample-size 100] [--seed 42]
 Requires output/report_data.json to already exist (run build_report_data.py first).
@@ -80,6 +85,7 @@ SUMMARY_COUNTS = {
     "reconciliation_mismatches": 0,
     "build_time_errors": 0,
     "build_time_warnings": 0,
+    "reference_match_count_mismatches": 0,
 }
 
 
@@ -90,7 +96,7 @@ def log(message=""):
     REPORT_LINES.append(message)
 
 
-TOTAL_STAGES = 7
+TOTAL_STAGES = 8
 
 
 @contextmanager
@@ -502,6 +508,55 @@ def check_build_issues():
         log(f"  [{severity.upper()}] {issue.get('message', issue)}")
 
 
+def check_reference_match_coverage(df):
+    """Part F: independently recomputes how many new-product SKUs (item_brand_mapping.csv)
+    and how many registered counters (Allocated_CounterCode) actually appear in real valid
+    order rows, then compares that independent count against what report_data.json itself
+    self-reports for the same two numbers. This is a genuine cross-check of the build's own
+    matching logic (db.new_product_sku_set / db.join_counter_age), not just a restatement of
+    it -- a bug there would make the build agree with itself while still being wrong."""
+    log(f"\n{'='*70}\nPART F -- Reference-file match coverage (independent recompute)\n{'='*70}")
+
+    if not config.REPORT_JSON_PATH.exists():
+        log(f"  {config.REPORT_JSON_PATH} doesn't exist yet -- run build_report_data.py first, then rerun this.")
+        return
+
+    with open(config.REPORT_JSON_PATH, encoding="utf-8") as f:
+        report = json.load(f)
+    meta = report.get("meta", {})
+
+    valid_df = df[df["_status_class"] == "valid"]
+    valid_skus_present = set(valid_df[config.SKU_ID_COLUMN].dropna())
+    valid_counters_present = set(valid_df[config.COUNTER_ID_COLUMN].dropna())
+
+    new_products_df, _ = db.load_new_products()
+    new_product_skus = (
+        set(new_products_df[config.NEW_PRODUCTS_SKU_COLUMN].dropna())
+        if not new_products_df.empty else set()
+    )
+    independent_np_matched = len(new_product_skus & valid_skus_present)
+    reported_np_matched = meta.get("new_product_skus_matched")
+    log(f"  New-product SKUs: {independent_np_matched:,}/{len(new_product_skus):,} independently found "
+        f"to have matching valid order rows (report_data.json says {reported_np_matched})")
+    if reported_np_matched is not None and reported_np_matched != independent_np_matched:
+        SUMMARY_COUNTS["reference_match_count_mismatches"] += 1
+        log(f"    MISMATCH -- independent recompute disagrees with what the build self-reported.")
+
+    new_counters_df, _ = db.load_new_counters()
+    registered_counter_codes = (
+        set(new_counters_df[config.NEW_COUNTERS_ID_COLUMN].dropna())
+        if new_counters_df is not None and not new_counters_df.empty else set()
+    )
+    independent_counter_matched = len(registered_counter_codes & valid_counters_present)
+    reported_counter_matched = meta.get("new_counters_matched_to_orders")
+    log(f"  Registered counters: {independent_counter_matched:,}/{len(registered_counter_codes):,} "
+        f"independently found to have matching valid order rows (report_data.json says "
+        f"{reported_counter_matched})")
+    if reported_counter_matched is not None and reported_counter_matched != independent_counter_matched:
+        SUMMARY_COUNTS["reference_match_count_mismatches"] += 1
+        log(f"    MISMATCH -- independent recompute disagrees with what the build self-reported.")
+
+
 def run_check(label, fn, *args):
     """Runs one check; if it throws, the failure (with full traceback) goes into the report
     instead of killing the process and losing everything else that would have run."""
@@ -522,6 +577,7 @@ SUMMARY_LABELS = {
     "reconciliation_mismatches": "SKU-level reconciliation mismatches (Part B)",
     "build_time_errors": "Build-time errors -- data likely missing (Part C)",
     "build_time_warnings": "Build-time warnings (Part C)",
+    "reference_match_count_mismatches": "Reference match counts disagreeing with the build (Part F)",
 }
 
 
@@ -590,6 +646,12 @@ def main():
 
     with stage("PART C -- build-time issues", 7):
         run_check("PART C", check_build_issues)
+
+    with stage("PART F -- reference match coverage", 8):
+        if df is not None:
+            run_check("PART F", check_reference_match_coverage, df)
+        else:
+            log("  Skipping -- no raw data could be loaded.")
 
     print_summary()
 
