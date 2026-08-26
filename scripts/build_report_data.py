@@ -225,6 +225,25 @@ def build_division_tab(valid_df):
             f"Division Trend tab only (still counted in the other two tabs)."
         )
 
+    # A handful of rows can carry a transaction date before the business's actual start (data
+    # entry errors, pre-launch test orders) -- left unclipped, these silently create a stray
+    # extra period (e.g. an "FY23" point) on the trend chart before the business existed.
+    # Clip to the intended window here; still counted in the other two tabs, which don't chart
+    # by period.
+    start_period = pd.Period(config.TREND_START_MONTH, freq="M")
+    end_period = pd.Period(config.TREND_END_MONTH, freq="M")
+    txn_period = df["_txn_date"].dt.to_period("M")
+    in_window = (txn_period >= start_period) & (txn_period <= end_period)
+    out_of_window_rows = int((~in_window).sum())
+    if out_of_window_rows:
+        db.report_issue(
+            "warning",
+            f"{out_of_window_rows:,} valid row(s) have a transaction date outside the intended "
+            f"Division Trend window ({config.TREND_START_MONTH} to {config.TREND_END_MONTH}) -- "
+            f"excluded from the Division Trend tab only (still counted in the other two tabs)."
+        )
+    df = df[in_window]
+
     df["_month"] = df["_txn_date"].dt.to_period("M").astype(str)
 
     group_cols = ["_month", config.SKU_ID_COLUMN, "Item_Description", "Brand", "Division_Name"]

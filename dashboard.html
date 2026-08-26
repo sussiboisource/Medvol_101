@@ -27,11 +27,11 @@
   .tab-panel { display: none; padding: 20px 28px 40px; }
   .tab-panel.active { display: block; }
   .controls {
-    display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-end;
+    display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-start;
     background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
-    padding: 14px 18px; margin-bottom: 18px;
+    padding: 10px 14px; margin-bottom: 14px; font-size: 13px;
   }
-  .control-group { display: flex; flex-direction: column; gap: 6px; }
+  .control-group { display: flex; flex-direction: column; gap: 5px; }
   .control-group label.group-label { font-size: 11px; text-transform: uppercase; color: var(--muted); letter-spacing: .03em; }
   .checkbox-row, .radio-row { display: flex; gap: 12px; }
   .checkbox-row label, .radio-row label { display: flex; align-items: center; gap: 5px; font-size: 13px; cursor: pointer; }
@@ -60,8 +60,16 @@
     border-radius: 8px; padding: 10px 16px; margin: 0 28px 16px; font-size: 12.5px; line-height: 1.5;
   }
   .error-banner .issue-warning { color: #9a3412; }
-  .entity-list { max-height: 220px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; min-width: 220px; }
+  .entity-list { max-height: 180px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; min-width: 200px; }
   .entity-list label { display: flex; align-items: center; gap: 6px; font-size: 12.5px; padding: 3px 0; cursor: pointer; }
+  .entity-details summary {
+    cursor: pointer; list-style: none; font-size: 11px; text-transform: uppercase;
+    color: var(--muted); letter-spacing: .03em; user-select: none;
+  }
+  .entity-details summary::-webkit-details-marker { display: none; }
+  .entity-details summary::before { content: '\25b8 '; display: inline-block; }
+  .entity-details[open] summary::before { content: '\25be '; }
+  .entity-details .select-all-row { margin-top: 8px; }
   svg text { font-family: inherit; }
   .axis-label { fill: var(--muted); font-size: 10.5px; }
   .bar-value { fill: var(--text); font-size: 10px; }
@@ -94,7 +102,6 @@
   <button class="tab-btn" data-tab="np">NP Discounts Tab</button>
 </div>
 
-<div id="meta-banner-slot"></div>
 
 <script type="application/json" id="report-data"></script>
 
@@ -122,12 +129,14 @@
       </select>
     </div>
     <div class="control-group">
-      <label class="group-label">Division (all checked by default)</label>
-      <div class="select-all-row">
-        <button type="button" class="select-all-btn" id="counter-division-select-all">Select all</button>
-        <button type="button" class="select-all-btn" id="counter-division-select-none">Deselect all</button>
-      </div>
-      <div class="entity-list" id="counter-division-filter"></div>
+      <details class="entity-details">
+        <summary>Division (all checked by default)</summary>
+        <div class="select-all-row">
+          <button type="button" class="select-all-btn" id="counter-division-select-all">Select all</button>
+          <button type="button" class="select-all-btn" id="counter-division-select-none">Deselect all</button>
+        </div>
+        <div class="entity-list" id="counter-division-filter"></div>
+      </details>
     </div>
   </div>
 
@@ -168,12 +177,14 @@
       </div>
     </div>
     <div class="control-group">
-      <label class="group-label">Entities shown (top 5 by sales, editable)</label>
-      <div class="select-all-row">
-        <button type="button" class="select-all-btn" id="division-entity-select-all">Select all</button>
-        <button type="button" class="select-all-btn" id="division-entity-select-none">Deselect all</button>
-      </div>
-      <div class="entity-list" id="division-entity-list"></div>
+      <details class="entity-details">
+        <summary>Entities shown (top 5 by sales, editable)</summary>
+        <div class="select-all-row">
+          <button type="button" class="select-all-btn" id="division-entity-select-all">Select all</button>
+          <button type="button" class="select-all-btn" id="division-entity-select-none">Deselect all</button>
+        </div>
+        <div class="entity-list" id="division-entity-list"></div>
+      </details>
     </div>
   </div>
 
@@ -199,12 +210,14 @@
       </div>
     </div>
     <div class="control-group">
-      <label class="group-label">Division (all checked by default)</label>
-      <div class="select-all-row">
-        <button type="button" class="select-all-btn" id="np-division-select-all">Select all</button>
-        <button type="button" class="select-all-btn" id="np-division-select-none">Deselect all</button>
-      </div>
-      <div class="entity-list" id="np-division-filter"></div>
+      <details class="entity-details">
+        <summary>Division (all checked by default)</summary>
+        <div class="select-all-row">
+          <button type="button" class="select-all-btn" id="np-division-select-all">Select all</button>
+          <button type="button" class="select-all-btn" id="np-division-select-none">Deselect all</button>
+        </div>
+        <div class="entity-list" id="np-division-filter"></div>
+      </details>
     </div>
   </div>
 
@@ -219,6 +232,8 @@
     <div id="np-table"></div>
   </div>
 </div>
+
+<div id="meta-banner-slot"></div>
 
 <script>
 const LINE_COLORS = ['var(--line1)', 'var(--line2)', 'var(--line3)', 'var(--line4)', 'var(--line5)'];
