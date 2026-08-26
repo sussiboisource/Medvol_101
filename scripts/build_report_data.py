@@ -83,10 +83,8 @@ def classify_status(status):
     return "Unclassified"
 
 
-def compute_canonical_date(df):
-    primary = db.parse_dates(df[config.PRIMARY_DATE_COLUMN])
-    fallback = db.parse_dates(df[config.FALLBACK_DATE_COLUMN])
-    return primary.fillna(fallback)
+# Moved into db.py so the loader can derive file periods from the data instead of the filename.
+compute_canonical_date = db.compute_canonical_date
 
 
 def compute_fy_label(txn_date):
@@ -403,47 +401,10 @@ def main():
             })
         per_file_summary.sort(key=lambda r: r["file"])
 
-        # Does each file actually contain the months its FILENAME claims? Nothing checked this
-        # before, and it is the root cause of the biggest problem in this dataset: a file named
-        # "Aug'25 to Oct'25" that really holds Aug-Dec silently duplicates every Nov and Dec
-        # order against the dedicated Nov and Dec files. The filename drives the period used for
-        # dedup ordering and coverage reporting, so a wrong name quietly corrupts both.
-        filename_period_mismatches = []
-        for filename, group in orders_df.groupby("_source_file"):
-            dated = group["_txn_date"].dropna()
-            if dated.empty:
-                continue
-            try:
-                declared_start = pd.Period(group["_period_start"].iloc[0], freq="M")
-                declared_end = pd.Period(group["_period_end"].iloc[0], freq="M")
-            except (ValueError, TypeError):
-                continue
-            actual = dated.dt.to_period("M")
-            outside = actual[(actual < declared_start) | (actual > declared_end)]
-            if len(outside) <= 0.01 * len(dated):
-                continue  # a handful of stragglers is normal; a systematic mismatch is not
-            extra_months = sorted(str(m) for m in outside.unique())
-            filename_period_mismatches.append({
-                "file": filename,
-                "declared": f"{declared_start}..{declared_end}",
-                "actual": f"{actual.min()}..{actual.max()}",
-                "rows_outside": int(len(outside)),
-                "share_outside": round(100 * len(outside) / len(dated), 1),
-                "unexpected_months": extra_months[:12],
-            })
-        for mm in filename_period_mismatches:
-            db.report_issue(
-                "error",
-                f"FILENAME DOES NOT MATCH CONTENTS: '{mm['file']}' is named for "
-                f"{mm['declared']} but actually contains data from {mm['actual']} -- "
-                f"{mm['rows_outside']:,} row(s) ({mm['share_outside']}%) fall outside the months "
-                f"its name claims, in {mm['unexpected_months']}. If another file also covers "
-                f"those months, every order in them is being counted twice.",
-                action=f"Confirm what '{mm['file']}' is meant to cover. If the name is wrong, "
-                       f"rename it (or add a row to data/file_periods.csv giving its real "
-                       f"period_start/period_end). If the extra months are meant to be there, "
-                       f"remove the other file(s) covering the same months.",
-            )
+        # Filename-vs-contents mismatches are detected in db.load_order_lines(), which derives
+        # each file's real period from its dates and uses that everywhere. Just carried through
+        # to the JSON here so the dashboard can show it.
+        filename_period_mismatches = load_meta.get("file_period_mismatches", [])
 
         # Files whose cancelled/rejected share is wildly off the corpus norm are usually a
         # differently-prepared export -- most often one already pre-filtered to invoiced orders.

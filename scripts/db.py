@@ -72,6 +72,38 @@ def parse_dates(series):
     return parsed
 
 
+def compute_canonical_date(df):
+    """The transaction date: OrdPlaced_Date, falling back to Order_InitiatedDate when blank.
+    Lives here rather than in build_report_data because the LOADER needs it too -- file periods
+    are derived from the data itself, not trusted from the filename."""
+    primary = parse_dates(df[config.PRIMARY_DATE_COLUMN])
+    fallback = parse_dates(df[config.FALLBACK_DATE_COLUMN])
+    return primary.fillna(fallback)
+
+
+def actual_period_from_data(df):
+    """The months a file's rows REALLY cover, as (first_month, last_month, month_count).
+
+    Filenames are not trustworthy: a real file named "Aug'25 to Oct'25" turned out to hold
+    roughly five months, and because the filename drove the period used for dedup ordering and
+    coverage reporting, that single wrong label silently double-counted ~112k order lines.
+    Deriving the period from the dates in the data removes the filename from the trust chain
+    entirely -- it becomes a cross-check to report on, not an input anything depends on."""
+    if config.PRIMARY_DATE_COLUMN not in df.columns or config.FALLBACK_DATE_COLUMN not in df.columns:
+        return None, None, 0
+    dated = compute_canonical_date(df).dropna()
+    if dated.empty:
+        return None, None, 0
+    months = dated.dt.to_period("M")
+    # Count months that actually carry a meaningful share of rows, so one stray mistyped date
+    # can't make a clean single-month file look like it spans three years.
+    share = months.value_counts(normalize=True)
+    real_months = share[share >= 0.01].index
+    if len(real_months) == 0:
+        real_months = months.unique()
+    return min(real_months), max(real_months), len(real_months)
+
+
 MONTH_NUMBERS = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5,
     "jun": 6, "june": 6, "jul": 7, "july": 7, "aug": 8,
@@ -277,6 +309,7 @@ def load_order_lines():
 
     frames = []
     files_failed = []
+    file_period_mismatches = []
     for i, info in enumerate(file_infos, start=1):
         print(f"{progress_bar(i - 1, total_files)} reading {info['filename']} ...", flush=True)
         t0 = time.perf_counter()
@@ -295,9 +328,23 @@ def load_order_lines():
             continue
         elapsed = time.perf_counter() - t0
         _check_columns(info["filename"], df)
+
+        # What this file REALLY covers, from its dates -- the filename is only cross-checked.
+        act_start, act_end, act_months = actual_period_from_data(df)
+        info["actual_start"], info["actual_end"], info["actual_months"] = act_start, act_end, act_months
+        if act_start is not None and (act_start < info["period_start"] or act_end > info["period_end"]):
+            file_period_mismatches.append({
+                "file": info["filename"],
+                "declared": f"{info['period_start']}..{info['period_end']}",
+                "actual": f"{act_start}..{act_end}",
+                "months": act_months,
+            })
+
         df["_source_file"] = info["filename"]
-        df["_period_start"] = str(info["period_start"])
-        df["_period_end"] = str(info["period_end"])
+        # Downstream consumes the ACTUAL period; the declared one is kept only for reporting.
+        df["_period_start"] = str(act_start if act_start is not None else info["period_start"])
+        df["_period_end"] = str(act_end if act_end is not None else info["period_end"])
+        df["_declared_period"] = f"{info['period_start']}..{info['period_end']}"
         frames.append(df)
         print(f"{progress_bar(i, total_files)} done: {len(df):,} rows in {elapsed:.1f}s", flush=True)
 
@@ -321,9 +368,26 @@ def load_order_lines():
     dup_key = [config.SKU_ID_COLUMN, "Order_Number"]
     value_check_cols = ["Amount", "InvoiceAmount", "Quantity", "DiscountOnPTR"]
 
-    # Which file covers the latest months -- used by the "keep_latest" conflict policy, and to
-    # describe the overlap in plain language either way.
-    file_recency = {info["filename"]: str(info["period_end"]) for info in file_infos}
+    # Ranking data for the conflict policies, all derived from the DATA rather than filenames.
+    # "narrowest" = fewest months covered: a file dedicated to one month beats a bulk export
+    # that merely happens to contain that month. Ties break toward the later period.
+    file_recency = {
+        info["filename"]: str(info.get("actual_end") or info["period_end"])
+        for info in file_infos
+    }
+    file_span = {
+        info["filename"]: info.get("actual_months") or 999
+        for info in file_infos
+    }
+
+    def _winning_file(files):
+        if config.DUPLICATE_CONFLICT_POLICY == "keep_narrowest":
+            return min(files, key=lambda f: (file_span.get(f, 999), _neg_period(file_recency.get(f, ""))))
+        return max(files, key=lambda f: file_recency.get(f, ""))
+
+    def _neg_period(period_str):
+        # min() with a "later is better" tiebreak -- invert the string ordering.
+        return tuple(-ord(c) for c in period_str)
 
     # IMPORTANT: (Item_Code, Order_Number) is NOT guaranteed unique within a single file -- the
     # same SKU can appear as two separate lines on one order (different batch, scheme, or
@@ -331,12 +395,13 @@ def load_order_lines():
     # legitimate second line. The right rule is "keep every row from ONE file, drop the other
     # files' copies" -- which collapses to keeping 1 row in the ordinary 1-line-per-file case,
     # and correctly keeps both lines when an order really does list a SKU twice.
-    def _keep_only_latest_file(group):
-        latest = max(group["_source_file"].unique(), key=lambda f: file_recency.get(f, ""))
-        return group.index[group["_source_file"] != latest].tolist()
+    def _keep_only_winning_file(group):
+        winner = _winning_file(group["_source_file"].unique())
+        return group.index[group["_source_file"] != winner].tolist()
 
     conflicting_keys = []
     conflict_file_pairs = {}
+    conflict_winners = {}
     conflict_extra_rows = 0
     conflict_extra_amount = 0.0
     rows_to_drop = []
@@ -353,21 +418,38 @@ def load_order_lines():
             # What keeping every copy actually costs. Measured against the copy set we WOULD
             # keep (the latest file's rows), not against a single row -- otherwise a legitimate
             # two-line order would be reported as if one of its lines were duplicate money.
-            latest = max(group["_source_file"].unique(), key=lambda f: file_recency.get(f, ""))
-            kept = group[group["_source_file"] == latest]
+            winner = _winning_file(group["_source_file"].unique())
+            kept = group[group["_source_file"] == winner]
             amounts = pd.to_numeric(group["Amount"], errors="coerce").fillna(0.0)
             kept_amounts = pd.to_numeric(kept["Amount"], errors="coerce").fillna(0.0)
             conflict_extra_rows += len(group) - len(kept)
             conflict_extra_amount += float(amounts.sum() - kept_amounts.sum())
-            if config.DUPLICATE_CONFLICT_POLICY == "keep_latest":
-                rows_to_drop.extend(_keep_only_latest_file(group))
+            conflict_winners[winner] = conflict_winners.get(winner, 0) + 1
+            if config.DUPLICATE_CONFLICT_POLICY != "keep_all":
+                rows_to_drop.extend(_keep_only_winning_file(group))
             continue
         # Values agree across files, so the copies are interchangeable -- but keep the whole
         # row set from one file rather than a single row, for the multi-line reason above.
-        rows_to_drop.extend(_keep_only_latest_file(group))
+        rows_to_drop.extend(_keep_only_winning_file(group))
 
     deduped = combined.drop(index=rows_to_drop)
     print(f"  done in {time.perf_counter() - t0:.1f}s ({len(deduped):,} rows after dedup)", flush=True)
+
+    if file_period_mismatches:
+        listed = "; ".join(
+            f"'{m['file']}' is named {m['declared']} but holds {m['actual']} ({m['months']} months)"
+            for m in file_period_mismatches
+        )
+        report_issue(
+            "warning",
+            f"{len(file_period_mismatches)} file(s) contain months their FILENAME doesn't claim: "
+            f"{listed}. The real range from the data is being used for everything, so this is "
+            f"handled -- but where two files cover the same month, their shared orders are "
+            f"duplicates that had to be resolved.",
+            action="No action needed for this build. When the exports are being produced "
+                   "consistently again, rename these to match their contents (or set the real "
+                   "period in data/file_periods.csv) so the overlap stops happening at source.",
+        )
 
     if skipped_files:
         report_issue(
@@ -383,15 +465,24 @@ def load_order_lines():
             f"{' + '.join(files)}: {count:,} line(s)"
             for files, count in sorted(conflict_file_pairs.items(), key=lambda kv: -kv[1])[:5]
         )
-        if config.DUPLICATE_CONFLICT_POLICY == "keep_latest":
+        if config.DUPLICATE_CONFLICT_POLICY != "keep_all":
+            why = ("the file covering the fewest months wins, so a dedicated monthly export "
+                   "beats a bulk export that merely includes that month"
+                   if config.DUPLICATE_CONFLICT_POLICY == "keep_narrowest"
+                   else "the file covering the latest months wins")
+            winners = ", ".join(f"{f} ({n:,})" for f, n in
+                                sorted(conflict_winners.items(), key=lambda kv: -kv[1])[:5])
             report_issue(
                 "info",
-                f"{len(conflicting_keys):,} order line(s) appear in more than one file with "
-                f"DIFFERENT values. Policy is 'keep_latest', so the copy from the newest export "
-                f"was kept and {conflict_extra_rows:,} older copies (Rs {conflict_extra_amount:,.0f}) "
-                f"were dropped. Overlaps: {overlap_desc}",
-                action="Set DUPLICATE_CONFLICT_POLICY = \"keep_all\" in scripts/config.py if you "
-                       "would rather keep every copy and reconcile by hand.",
+                f"{len(conflicting_keys):,} order line(s) appeared in more than one file with "
+                f"DIFFERENT values. Policy '{config.DUPLICATE_CONFLICT_POLICY}' resolved them -- "
+                f"{why}. {conflict_extra_rows:,} duplicate copies "
+                f"(Rs {conflict_extra_amount:,.0f}) were dropped, so totals are no longer "
+                f"inflated. Kept from: {winners}. Overlaps: {overlap_desc}",
+                action="Numbers now differ from a 'keep_all' build by exactly the amount above. "
+                       "Set DUPLICATE_CONFLICT_POLICY = \"keep_all\" in scripts/config.py to go "
+                       "back to counting every copy, or run scripts/inspect_duplicates.py to see "
+                       "individual cases.",
             )
         else:
             report_issue(
@@ -421,6 +512,7 @@ def load_order_lines():
             {"files": list(files), "lines": count}
             for files, count in sorted(conflict_file_pairs.items(), key=lambda kv: -kv[1])[:10]
         ],
+        "file_period_mismatches": file_period_mismatches,
     }
     return deduped, meta
 

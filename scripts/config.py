@@ -103,13 +103,20 @@ CSV_ENCODING_FALLBACKS = ("utf-8", "cp1252", "latin-1")
 # DIFFERENT Amount/InvoiceAmount/Quantity/DiscountOnPTR values. This is common when a later
 # export restates earlier orders (e.g. an order placed in Nov shipping in Jan gets its final
 # invoice amount in the January file).
+#   "keep_narrowest" -- (default) keep the copy from the file that covers the FEWEST months, on
+#                  the reasoning that an export dedicated to one month is a better source for
+#                  that month than a bulk export that merely happens to include it. Ties break
+#                  toward the later period. This resolves the real dataset's problem without
+#                  anyone having to re-export or rename anything.
+#   "keep_latest" -- keep the copy from the file covering the LATEST months, on the reasoning
+#                  that the newest export is the most restated/final.
 #   "keep_all"  -- keep every copy. Nothing is guessed, but the line IS counted more than once,
-#                  so every total is inflated by the duplicates. This is the historical default.
-#   "keep_latest" -- keep the copy from the file whose period covers the LATEST months, on the
-#                  reasoning that the newest export is the most restated/final. Deterministic,
-#                  removes the double-count, but does discard the older figures.
-# The build reports the rupee value at stake either way, so you can see what the choice costs.
-DUPLICATE_CONFLICT_POLICY = "keep_all"
+#                  so every total is inflated by the duplicates. The historical behaviour;
+#                  useful if you want to reconcile by hand rather than let a rule decide.
+# Periods here are DERIVED FROM THE DATA (db.actual_period_from_data), not from the filename,
+# so a mislabelled file cannot skew the choice. The build reports how many rows and how many
+# rupees each decision moved.
+DUPLICATE_CONFLICT_POLICY = "keep_narrowest"
 
 # A file whose share of excluded (cancelled/rejected) rows differs wildly from the corpus norm
 # is usually a differently-prepared export -- e.g. already pre-filtered to invoiced orders only.

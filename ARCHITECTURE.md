@@ -121,6 +121,15 @@ sort back to `Total` if the column being sorted on is the one just filtered out.
 has no such filter because `division_tab` carries no bucket dimension at all (it aggregates
 weighted discount %, not bucketed sales) — adding one there would require a backend regroup.
 
+**The two Division tables show Discount % rather than repeating Medvol %/Net Sales %.** Those
+two percentages were previously both a dedicated column *and* a click-to-expand sub-line under
+Amount/Invoice — pure duplication. The columns are gone; the sub-lines remain (labelled
+"Medvol …"/"Net sales …"). In their place is **Discount %** = `(gross - amount) / gross`, the
+one figure the tables never showed anywhere, with `invoice/gross %` on its expanded sub-line.
+The period table also carries a sortable **FY** column, and its search box matches entity name,
+period, *or* FY — so "FY26" pulls up every month in that year. The FY column renders only in
+Month view; in FY view the Period column already is the financial year.
+
 **All four data tables have sortable column headers** — click any header to sort by that
 column (bucket amount, Amount, Invoice Amount, Gross Sales, Medvol %, Net Sales %, Period,
 entity name), click again to reverse direction. Shared machinery: `attachSortableHeaders()` +
@@ -166,6 +175,18 @@ of each, as actually implemented:
   many extra rows and how many rupees — plus which file pairs overlap, so the trade-off is
   visible instead of abstract. On the real dataset this is ~112k lines, which is why the
   default's inflation is reported at `error` severity rather than as a passing note.
+
+- **File periods come from the DATA, not the filename — changed 2026-08-26.**
+  `db.actual_period_from_data()` derives each file's real month coverage from its dates, and
+  that is what dedup ordering and coverage reporting use. The filename is only cross-checked
+  and reported on. This exists because the real exports are inconsistently labelled and cannot
+  be re-exported on demand, so the pipeline has to be correct *despite* the labels rather than
+  depending on them. `DUPLICATE_CONFLICT_POLICY` now defaults to `"keep_narrowest"`: the file
+  covering the fewest months wins, i.e. a dedicated monthly export beats a bulk export that
+  merely happens to include that month. Ties break toward the later period. Verified against a
+  synthetic reproduction of the real situation (a bulk file labelled Aug–Oct holding Aug–Dec,
+  overlapping dedicated Nov and Dec files with different values): 240 rows in, 200 out, the
+  dedicated files' copies kept.
 
 - **A file whose contents don't match its filename — now detected.** The filename drives each
   file's period, which in turn drives dedup ordering and coverage reporting, so a wrong name

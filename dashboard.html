@@ -220,7 +220,7 @@
     <p class="totals-table-title">Totals across the shown period (actual value + %)</p>
     <div id="division-totals-table"></div>
     <p class="totals-table-title">Breakdown by period (actual value + %)</p>
-    <input type="text" class="table-filter" id="division-period-table-filter" placeholder="Filter by name...">
+    <input type="text" class="table-filter" id="division-period-table-filter" placeholder="Filter by name, period, or FY (e.g. FY26)...">
     <div id="division-period-table"></div>
   </div>
 </div>
@@ -729,9 +729,17 @@ function renderDivisionTab() {
   renderDivisionPeriodTable(level, periodMode, selected, fyFilter);
 }
 
+// Discount % = how much of gross was given away, i.e. gross minus what was actually billed.
+// This is the one figure the tables never showed anywhere; Medvol % (amount/gross) and Net
+// Sales % (invoice/gross) are its complements and now live in the click-to-expand cells.
+function discountPct(row) {
+  return row.gross ? 100 * (row.gross - row.amount) / row.gross : 0;
+}
+
 function divisionRowSortValue(row, column) {
   if (column === 'medvol') return row.gross ? 100 * row.amount / row.gross : 0;
   if (column === 'net_sales') return row.gross ? 100 * row.invoice / row.gross : 0;
+  if (column === 'discount_pct') return discountPct(row);
   return row[column];
 }
 
@@ -764,7 +772,9 @@ function renderDivisionPeriodTable(level, periodMode, selected, fyFilter) {
     if (fyFilter !== 'all' && fyLabel(r.month) !== fyFilter) return;
     const period = periodMode === 'fy' ? fyLabel(r.month) : r.month;
     const cellKey = period + '|' + key;
-    if (!byPeriodEntity[cellKey]) byPeriodEntity[cellKey] = { period, key, amount: 0, invoice: 0, gross: 0 };
+    // fy is carried on every row so it can be a sortable column and match the search box,
+    // which matters in Month view where the period alone ("2025-08") doesn't show its FY.
+    if (!byPeriodEntity[cellKey]) byPeriodEntity[cellKey] = { period, key, fy: fyLabel(r.month), amount: 0, invoice: 0, gross: 0 };
     byPeriodEntity[cellKey].amount += r.amount_sum;
     byPeriodEntity[cellKey].invoice += r.invoice_amount_sum;
     byPeriodEntity[cellKey].gross += r.gross_sales_sum;
@@ -774,14 +784,17 @@ function renderDivisionPeriodTable(level, periodMode, selected, fyFilter) {
     a.period === b.period ? a.key.localeCompare(b.key) : a.period.localeCompare(b.period)
   );
   window._divisionPeriodLevel = level;
+  window._divisionPeriodMode = periodMode;
   renderFilteredDivisionPeriodTable();
 }
 
 function renderFilteredDivisionPeriodTable() {
   const level = window._divisionPeriodLevel || 'division';
   const filterText = document.getElementById('division-period-table-filter').value.trim().toLowerCase();
+  // Search matches the entity name, the period, OR the FY -- so typing "FY26" pulls up every
+  // month in that financial year even when the period column shows "2025-08".
   const rows = divisionPeriodRows
-    .filter(r => r.key.toLowerCase().includes(filterText))
+    .filter(r => (r.key + ' ' + r.period + ' ' + (r.fy || '')).toLowerCase().includes(filterText))
     .sort((a, b) => compareDivisionRows(a, b, divisionPeriodSort));
 
   const container = document.getElementById('division-period-table');
@@ -790,18 +803,23 @@ function renderFilteredDivisionPeriodTable() {
     return;
   }
   const entityLabel = LEVEL_LABELS[level].charAt(0).toUpperCase() + LEVEL_LABELS[level].slice(1);
-  const cols = [['period', 'Period'], ['key', entityLabel], ['amount', 'Amount'], ['invoice', 'Invoice Amount'], ['gross', 'Gross Sales'], ['medvol', 'Medvol %'], ['net_sales', 'Net Sales %']];
+  // In FY view the Period column already IS the financial year, so a separate FY column would
+  // just repeat it. It earns its place only in Month view, where Period reads "2025-08".
+  const showFyCol = window._divisionPeriodMode === 'month';
+  const cols = [['period', 'Period']]
+    .concat(showFyCol ? [['fy', 'FY']] : [])
+    .concat([['key', entityLabel], ['amount', 'Amount'], ['invoice', 'Invoice Amount'], ['gross', 'Gross Sales'], ['discount_pct', 'Discount %']]);
   let html = '<table><thead>' + renderSortableDivisionHeader(cols, divisionPeriodSort) + '</thead><tbody>';
   rows.forEach(r => {
     const medvolPct = r.gross ? 100 * r.amount / r.gross : 0;
     const netSalesPct = r.gross ? 100 * r.invoice / r.gross : 0;
     html += '<tr class="clickable-row" title="Click to show % of gross under each value">' +
-      '<td>' + r.period + '</td><td>' + escapeHtml(r.key) + '</td>' +
-      '<td><div class="cell-value">' + formatMoney(r.amount) + '</div><div class="cell-pct">' + medvolPct.toFixed(1) + '% of gross</div></td>' +
-      '<td><div class="cell-value">' + formatMoney(r.invoice) + '</div><div class="cell-pct">' + netSalesPct.toFixed(1) + '% of gross</div></td>' +
+      '<td>' + r.period + '</td>' + (showFyCol ? '<td>' + escapeHtml(r.fy || '') + '</td>' : '') +
+      '<td>' + escapeHtml(r.key) + '</td>' +
+      '<td><div class="cell-value">' + formatMoney(r.amount) + '</div><div class="cell-pct">Medvol ' + medvolPct.toFixed(1) + '% of gross</div></td>' +
+      '<td><div class="cell-value">' + formatMoney(r.invoice) + '</div><div class="cell-pct">Net sales ' + netSalesPct.toFixed(1) + '% of gross</div></td>' +
       '<td>' + formatMoney(r.gross) + '</td>' +
-      '<td>' + medvolPct.toFixed(1) + '%</td>' +
-      '<td>' + netSalesPct.toFixed(1) + '%</td></tr>';
+      '<td><div class="cell-value">' + discountPct(r).toFixed(1) + '%</div><div class="cell-pct">Invoice/gross ' + netSalesPct.toFixed(1) + '%</div></td></tr>';
   });
   html += '</tbody></table>';
   container.innerHTML = html;
@@ -829,18 +847,17 @@ function renderDivisionTotalsTable(level, selected, fyFilter) {
     return;
   }
   const entityLabel = LEVEL_LABELS[level].charAt(0).toUpperCase() + LEVEL_LABELS[level].slice(1);
-  const cols = [['key', entityLabel], ['amount', 'Amount (Discounted Sales)'], ['invoice', 'Invoice Amount'], ['gross', 'Gross Sales'], ['medvol', 'Medvol %'], ['net_sales', 'Net Sales %']];
+  const cols = [['key', entityLabel], ['amount', 'Amount (Discounted Sales)'], ['invoice', 'Invoice Amount'], ['gross', 'Gross Sales'], ['discount_pct', 'Discount %']];
   let html = '<table><thead>' + renderSortableDivisionHeader(cols, divisionTotalsSort) + '</thead><tbody>';
   rows.forEach(t => {
     const medvolPct = t.gross ? 100 * t.amount / t.gross : 0;
     const netSalesPct = t.gross ? 100 * t.invoice / t.gross : 0;
     html += '<tr class="clickable-row" title="Click to show % of gross under each value">' +
       '<td>' + escapeHtml(t.key) + '</td>' +
-      '<td><div class="cell-value">' + formatMoney(t.amount) + '</div><div class="cell-pct">' + medvolPct.toFixed(1) + '% of gross</div></td>' +
-      '<td><div class="cell-value">' + formatMoney(t.invoice) + '</div><div class="cell-pct">' + netSalesPct.toFixed(1) + '% of gross</div></td>' +
+      '<td><div class="cell-value">' + formatMoney(t.amount) + '</div><div class="cell-pct">Medvol ' + medvolPct.toFixed(1) + '% of gross</div></td>' +
+      '<td><div class="cell-value">' + formatMoney(t.invoice) + '</div><div class="cell-pct">Net sales ' + netSalesPct.toFixed(1) + '% of gross</div></td>' +
       '<td>' + formatMoney(t.gross) + '</td>' +
-      '<td>' + medvolPct.toFixed(1) + '%</td>' +
-      '<td>' + netSalesPct.toFixed(1) + '%</td></tr>';
+      '<td><div class="cell-value">' + discountPct(t).toFixed(1) + '%</div><div class="cell-pct">Invoice/gross ' + netSalesPct.toFixed(1) + '%</div></td></tr>';
   });
   html += '</tbody></table>';
   container.innerHTML = html;
