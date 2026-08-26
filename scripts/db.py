@@ -63,12 +63,20 @@ def parse_dates(series):
     .xlsb via pyxlsb, which does NOT auto-convert date-formatted cells like openpyxl does --
     it hands back the underlying day-count number, e.g. "45673.5", which under dtype=str
     becomes a plain numeric string pd.to_datetime can't recognize as a date at all). Without
-    this fallback, every date in every .xlsb file silently becomes unparseable."""
+    this fallback, every date in every .xlsb file silently becomes unparseable.
+
+    Some cells contain garbage that coerces to NaN or infinity, or impossibly large numbers
+    that overflow during datetime conversion -- filter those out before attempting the
+    conversion to avoid FloatingPointError."""
     parsed = pd.to_datetime(series, errors="coerce")
     unresolved = parsed.isna() & series.notna()
     if unresolved.any():
         serials = pd.to_numeric(series[unresolved], errors="coerce")
-        parsed.loc[unresolved] = pd.to_datetime(serials, unit="D", origin=EXCEL_DATE_ORIGIN, errors="coerce")
+        # Discard NaN/infinity and values outside the plausible Excel serial range.
+        # Excel date serials are integers from 0 (1900-01-01) to ~48,000 (year 2130).
+        valid_serials = serials[(serials.notna()) & (serials > 0) & (serials < 100000)]
+        if len(valid_serials) > 0:
+            parsed.loc[valid_serials.index] = pd.to_datetime(valid_serials, unit="D", origin=EXCEL_DATE_ORIGIN, errors="coerce")
     return parsed
 
 
