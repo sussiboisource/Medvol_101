@@ -104,7 +104,7 @@
       <label class="group-label">Counter Age</label>
       <div class="checkbox-row">
         <label><input type="checkbox" id="age-old" checked> Old</label>
-        <label><input type="checkbox" id="age-new"> New</label>
+        <label><input type="checkbox" id="age-new" checked> New</label>
       </div>
     </div>
     <div class="control-group">
@@ -601,15 +601,17 @@ function renderFilteredDivisionPeriodTable() {
   rows.forEach(r => {
     const medvolPct = r.gross ? 100 * r.amount / r.gross : 0;
     const netSalesPct = r.gross ? 100 * r.invoice / r.gross : 0;
-    html += '<tr><td>' + r.period + '</td><td>' + escapeHtml(r.key) + '</td>' +
-      '<td>' + formatMoney(r.amount) + '</td>' +
-      '<td>' + formatMoney(r.invoice) + '</td>' +
+    html += '<tr class="clickable-row" title="Click to show % of gross under each value">' +
+      '<td>' + r.period + '</td><td>' + escapeHtml(r.key) + '</td>' +
+      '<td><div class="cell-value">' + formatMoney(r.amount) + '</div><div class="cell-pct">' + medvolPct.toFixed(1) + '% of gross</div></td>' +
+      '<td><div class="cell-value">' + formatMoney(r.invoice) + '</div><div class="cell-pct">' + netSalesPct.toFixed(1) + '% of gross</div></td>' +
       '<td>' + formatMoney(r.gross) + '</td>' +
       '<td>' + medvolPct.toFixed(1) + '%</td>' +
       '<td>' + netSalesPct.toFixed(1) + '%</td></tr>';
   });
   html += '</tbody></table>';
   container.innerHTML = html;
+  attachRowExpandToggle(container);
 }
 
 function renderDivisionTotalsTable(level, selected) {
@@ -635,15 +637,17 @@ function renderDivisionTotalsTable(level, selected) {
     const t = totals[key];
     const medvolPct = t.gross ? 100 * t.amount / t.gross : 0;
     const netSalesPct = t.gross ? 100 * t.invoice / t.gross : 0;
-    html += '<tr><td>' + escapeHtml(key) + '</td>' +
-      '<td>' + formatMoney(t.amount) + '</td>' +
-      '<td>' + formatMoney(t.invoice) + '</td>' +
+    html += '<tr class="clickable-row" title="Click to show % of gross under each value">' +
+      '<td>' + escapeHtml(key) + '</td>' +
+      '<td><div class="cell-value">' + formatMoney(t.amount) + '</div><div class="cell-pct">' + medvolPct.toFixed(1) + '% of gross</div></td>' +
+      '<td><div class="cell-value">' + formatMoney(t.invoice) + '</div><div class="cell-pct">' + netSalesPct.toFixed(1) + '% of gross</div></td>' +
       '<td>' + formatMoney(t.gross) + '</td>' +
       '<td>' + medvolPct.toFixed(1) + '%</td>' +
       '<td>' + netSalesPct.toFixed(1) + '%</td></tr>';
   });
   html += '</tbody></table>';
   container.innerHTML = html;
+  attachRowExpandToggle(container);
 }
 
 // ---------- tiny SVG chart helpers ----------

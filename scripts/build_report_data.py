@@ -36,6 +36,13 @@ REPORT_DATA_SCRIPT_RE = re.compile(
 
 def embed_data_in_dashboard(report_json_str):
     if not DASHBOARD_HTML_PATH.exists():
+        db.report_issue(
+            "error",
+            f"{DASHBOARD_HTML_PATH.name} does not exist at {DASHBOARD_HTML_PATH} -- no data was "
+            f"embedded into it (there was nothing to embed it into). output/report_data.json was "
+            f"still written and is current; the dashboard itself needs to exist first (git "
+            f"checkout it back, or pull again) before rerunning this script."
+        )
         return
     html = DASHBOARD_HTML_PATH.read_text(encoding="utf-8")
     safe_json = report_json_str.replace("</script>", "<\\/script>")
@@ -43,9 +50,12 @@ def embed_data_in_dashboard(report_json_str):
         lambda m: m.group(1) + safe_json + m.group(3), html
     )
     if count == 0:
-        print("WARNING: could not find the report-data <script> tag in dashboard.html -- "
-              "the embedded copy was not updated. dashboard.html will still work if served "
-              "over HTTP (output/report_data.json is current).")
+        db.report_issue(
+            "warning",
+            f"Could not find the report-data <script> tag in {DASHBOARD_HTML_PATH.name} -- the "
+            f"embedded copy was not updated. {DASHBOARD_HTML_PATH.name} will still work if served "
+            f"over HTTP (output/report_data.json is current)."
+        )
         return
     DASHBOARD_HTML_PATH.write_text(new_html, encoding="utf-8")
 
@@ -436,7 +446,11 @@ def main():
     total_elapsed = time.perf_counter() - run_start
     print(f"\nDone in {total_elapsed:.1f}s total.")
     print(f"Wrote {config.REPORT_JSON_PATH}")
-    print(f"Embedded data into {DASHBOARD_HTML_PATH.name} ({dashboard_size_mb:.1f} MB) -- it now works opened directly (file://), no server needed.")
+    if DASHBOARD_HTML_PATH.exists():
+        print(f"Embedded data into {DASHBOARD_HTML_PATH.name} ({dashboard_size_mb:.1f} MB) -- it now works opened directly (file://), no server needed.")
+    else:
+        print(f"  {DASHBOARD_HTML_PATH.name} DOES NOT EXIST -- nothing was embedded (see the ERROR above). "
+              f"Restore the file (git checkout it, or pull again) and rerun this script.")
     print(f"  rows: {output['meta']['row_counts']}")
     print(f"  counter_tab records: {len(counter_tab):,}")
     print(f"  division_tab records: {len(division_tab):,}")
