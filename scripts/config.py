@@ -35,6 +35,14 @@ NON_ORDER_FILE_PREFIXES = (
     "file_periods",
 )
 
+# Editor lock/temp files that live alongside the real data but contain no data at all.
+# Excel writes "~$<name>.xlsx" (a ~165-byte owner file) whenever a workbook is open; LibreOffice
+# writes ".~lock.<name>#". These are NOT missing data -- they're an artifact of having the real
+# file open. Treating them as order files produced two alarming-but-bogus errors on every build
+# ("MISSED ENTIRE FILE ... PermissionError" and "MISSED 1 FILE(S) ... never even opened") while
+# the real file right next to them loaded perfectly.
+IGNORED_FILENAME_PREFIXES = ("~$", ".~lock.")
+
 # Discount bucket edges, shared by both discount-range filters (DiscountOnPTR-only, and the
 # compounded Total_Discount_Pct). Edges are in percent. The 65-80 gap is intentionally wider
 # than the surrounding 10-point steps -- confirmed twice by the user, not a typo.
@@ -90,6 +98,45 @@ TREND_END_MONTH = "2026-07"
 
 # Encodings to try in order when reading a raw CSV (xlsx doesn't need this).
 CSV_ENCODING_FALLBACKS = ("utf-8", "cp1252", "latin-1")
+
+# What to do when the same (Item_Code, Order_Number) appears in MORE THAN ONE file with
+# DIFFERENT Amount/InvoiceAmount/Quantity/DiscountOnPTR values. This is common when a later
+# export restates earlier orders (e.g. an order placed in Nov shipping in Jan gets its final
+# invoice amount in the January file).
+#   "keep_all"  -- keep every copy. Nothing is guessed, but the line IS counted more than once,
+#                  so every total is inflated by the duplicates. This is the historical default.
+#   "keep_latest" -- keep the copy from the file whose period covers the LATEST months, on the
+#                  reasoning that the newest export is the most restated/final. Deterministic,
+#                  removes the double-count, but does discard the older figures.
+# The build reports the rupee value at stake either way, so you can see what the choice costs.
+DUPLICATE_CONFLICT_POLICY = "keep_all"
+
+# A file whose share of excluded (cancelled/rejected) rows differs wildly from the corpus norm
+# is usually a differently-prepared export -- e.g. already pre-filtered to invoiced orders only.
+# Not automatically wrong, but worth surfacing so it's a known fact rather than a surprise.
+EXCLUSION_RATE_ANOMALY_TOLERANCE = 0.5  # flag files below 50% or above 200% of the overall rate
+
+# The columns the pipeline's logic ACTUALLY reads. A file missing one of these is a real
+# problem: the affected metric silently goes blank/NaN for that file's rows. Everything else in
+# EXPECTED_COLUMNS below is just "what a typical export happens to contain" -- missing one of
+# those changes no number anywhere.
+#
+# This distinction exists because the build used to warn about every column in EXPECTED_COLUMNS.
+# Four real files legitimately lack "InvoiceAmount1" -- a column NOTHING in this codebase reads
+# (the invoice math uses "InvoiceAmount", no suffix) -- so every build printed four scary
+# warnings about data that was, in fact, completely fine. Real breakage was hidden in that noise.
+CRITICAL_COLUMNS = [
+    "Order_Number", "OrdPlaced_Date", "Order_InitiatedDate", "Doctor_Code", "Item_Code",
+    "Item_Description", "Division_Name", "Quantity", "Amount", "InvoiceAmount", "Order_Status",
+    "PTR", "DiscountOnPTR", "Cash_Discount",
+]
+
+# Columns that appear in some exports and not others, where the difference is known-harmless.
+# Listed explicitly so a genuinely NEW unexpected absence still gets reported rather than being
+# swept under the same rug.
+KNOWN_OPTIONAL_COLUMNS = {
+    "InvoiceAmount1",  # never read by any logic; "InvoiceAmount" is the one that matters
+}
 
 EXPECTED_COLUMNS = [
     "Order_Number", "Order_InitiatedDate", "OrdPlaced_Date", "Doctor_Code", "Doctor_Name",

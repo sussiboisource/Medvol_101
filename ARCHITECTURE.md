@@ -109,6 +109,18 @@ crashing). This adds a `_fy` dimension to those two tabs' groupings — safe at 
 because FY only has ~5 distinct values (FY24-FY27 + Unknown), unlike the per-counter or
 per-day cardinality that caused the original 300k-record crash.
 
+**Discount range is a real filter, not just a sort.** The Discount Dispersion and NP Discounts
+tabs each have a "Discount range" checkbox list (all 9 buckets checked by default). Deselecting
+a range removes it everywhere on that tab: it drops out of the bar chart, its table column
+disappears entirely rather than sitting there empty, and the row `Total` / `% of row total`
+recompute over only the visible ranges — so filtering to 15-25%+25-35% genuinely re-ranks the
+SKU table by sales *within those ranges*. Two guards worth knowing: the selection is re-derived
+from `BUCKET_ORDER` (`counterVisibleBuckets` / `npVisibleBuckets`) so ranges stay in ascending
+order no matter what order the boxes were clicked, and `resetSortIfColumnHidden()` falls the
+sort back to `Total` if the column being sorted on is the one just filtered out. Division Trend
+has no such filter because `division_tab` carries no bucket dimension at all (it aggregates
+weighted discount %, not bucketed sales) — adding one there would require a backend regroup.
+
 **All four data tables have sortable column headers** — click any header to sort by that
 column (bucket amount, Amount, Invoice Amount, Gross Sales, Medvol %, Net Sales %, Period,
 entity name), click again to reverse direction. Shared machinery: `attachSortableHeaders()` +
@@ -144,10 +156,44 @@ of each, as actually implemented:
   discount-bucketed tabs — this is now reported via `report_issue` when it happens (fixed
   2026-08-25; previously this exclusion was silent).
 
-- **Overlapping files with duplicate rows — handled.** `db.load_order_lines()` finds repeated
-  `(Item_Code, Order_Number)` pairs across *different* source files; identical values silently
-  keep one copy, but a genuine value conflict is flagged loudly via `report_issue`, listing
-  sample keys, rather than picking either row.
+- **Overlapping files with duplicate rows — quantified, policy is now a config choice.**
+  `db.load_order_lines()` finds repeated `(Item_Code, Order_Number)` pairs across *different*
+  source files; identical values silently keep one copy. A genuine value conflict (a later
+  export restating an earlier order) is governed by `config.DUPLICATE_CONFLICT_POLICY`:
+  `"keep_all"` (default, historical) keeps every copy — nothing is guessed, but the line is
+  **counted more than once, inflating every total**; `"keep_latest"` keeps only the copy from
+  the file covering the latest months. Either way the build now reports the exact cost — how
+  many extra rows and how many rupees — plus which file pairs overlap, so the trade-off is
+  visible instead of abstract. On the real dataset this is ~112k lines, which is why the
+  default's inflation is reported at `error` severity rather than as a passing note.
+
+- **Editor lock files misreported as missing data — fixed 2026-08-26.** Excel writes a
+  `~$Name.xlsx` owner file (~165 bytes, no data) next to any workbook that's open, and keeps it
+  locked. The loader treated these as order files, so every build printed two alarming errors —
+  `MISSED ENTIRE FILE ... PermissionError` and `MISSED 1 FILE(S) ... never even opened` — about
+  files that contain nothing, while the real file beside them loaded perfectly. Now skipped via
+  `config.IGNORED_FILENAME_PREFIXES` with a one-line note.
+
+- **Warnings about columns nothing reads — fixed 2026-08-26.** The column check compared every
+  file against all 57 `EXPECTED_COLUMNS`, so four real files were flagged for lacking
+  `InvoiceAmount1` — a column **no code in this project has ever read** (the invoice math uses
+  `InvoiceAmount`, no suffix). Four scary warnings per build about data that was completely
+  fine, which is exactly how a real problem gets missed. `config.CRITICAL_COLUMNS` now lists
+  the columns some calculation actually reads; missing one of those is an `error` that names
+  *which metric breaks* (`db.COLUMN_IMPACT`), while anything else is a quiet note.
+
+- **Exports prepared differently from each other — now detected.** A file whose cancelled/
+  rejected share is far off the corpus average is usually a differently-prepared export (most
+  often pre-filtered to invoiced orders only), which makes its months not directly comparable
+  to the rest. `EXCLUSION_RATE_ANOMALY_TOLERANCE` flags these; on the real dataset it correctly
+  identifies exactly 3 of 15 files — two at 0% and one at ~2x the norm.
+
+- **Every reported issue must be actionable.** `report_issue()` takes an `action=` argument: the
+  concrete next step. Advice that depends on the data is *computed*, never hardcoded — e.g. the
+  reference-join coverage check says "the join is broken, the New/Old split isn't working" when
+  nothing matched but "the formats agree, the rest just haven't ordered yet" when most did.
+  Report raw counts rather than percentages in these messages: 1 match out of 226 formats as
+  "0%", which read as a flat contradiction of the advice printed beside it.
 
 - **Reruns must fully replace, not merge — handled.** `build_report_data.py` always reads all
   of `data/` fresh and overwrites `output/report_data.json` wholesale; nothing is patched

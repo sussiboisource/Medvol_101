@@ -158,16 +158,24 @@ def check_file_health():
             continue
         opened_ok += 1
         total_rows += len(raw)
-        missing = expected_cols - set(raw.columns)
-        if not missing:
-            note = ""
-        elif len(missing) > len(expected_cols) / 2:
+        # Same critical-vs-cosmetic split the build uses: only a column some calculation
+        # actually reads counts as a problem. Flagging every absent column made four files look
+        # broken over "InvoiceAmount1", which nothing in this codebase has ever read.
+        present = set(raw.columns)
+        missing_critical = [c for c in config.CRITICAL_COLUMNS if c not in present]
+        missing_cosmetic = (expected_cols - present - set(config.CRITICAL_COLUMNS)
+                            - config.KNOWN_OPTIONAL_COLUMNS)
+        if missing_critical and len(missing_critical) >= len(config.CRITICAL_COLUMNS) / 2:
             SUMMARY_COUNTS["files_with_column_issues"] += 1
             shown = list(raw.columns)[:8]
-            note = f"  !! MOST/ALL expected columns missing (found instead: {shown}{'...' if len(raw.columns) > 8 else ''})"
-        else:
+            note = f"  !! MOST/ALL critical columns missing (found instead: {shown}{'...' if len(raw.columns) > 8 else ''})"
+        elif missing_critical:
             SUMMARY_COUNTS["files_with_column_issues"] += 1
-            note = f"  missing columns: {sorted(missing)}"
+            note = f"  !! missing columns the report USES: {missing_critical}"
+        elif missing_cosmetic:
+            note = f"  (missing {sorted(missing_cosmetic)} -- unused by any calculation, harmless)"
+        else:
+            note = ""
         log(f"    {info['filename']:<55} OK   {len(raw):>10,} rows  (period {info['period_start']}-{info['period_end']}){note}")
 
     log(f"\n  {opened_ok}/{len(file_infos)} order-line file(s) opened successfully, "

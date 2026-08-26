@@ -62,6 +62,19 @@
     border-radius: 8px; padding: 10px 16px; margin: 0 28px 16px; font-size: 12.5px; line-height: 1.5;
   }
   .error-banner .issue-warning { color: #9a3412; }
+  /* One issue = one card, so a real problem can't hide inside a wall of bullet text. */
+  .issue { border-left: 3px solid currentColor; padding: 6px 0 6px 10px; margin: 8px 0; }
+  .issue-tag {
+    display: inline-block; font-size: 10.5px; font-weight: 700; letter-spacing: .04em;
+    text-transform: uppercase; padding: 1px 6px; border-radius: 4px; margin-right: 6px;
+    background: currentColor;
+  }
+  .issue-tag span { color: #fff; }
+  .issue-info { color: #1e40af; }
+  .issue-action { display: block; margin-top: 3px; font-size: 12px; opacity: .95; }
+  .issue-action strong { text-transform: uppercase; font-size: 10.5px; letter-spacing: .04em; }
+  .banner-heading { display: block; margin-bottom: 2px; }
+  .banner-sub { display: block; font-weight: 400; opacity: .85; margin-bottom: 6px; }
   .entity-list { max-height: 180px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; min-width: 200px; }
   .entity-list label { display: flex; align-items: center; gap: 6px; font-size: 12.5px; padding: 3px 0; cursor: pointer; }
   .entity-details summary {
@@ -120,6 +133,16 @@
         <label><input type="radio" name="discount-type" value="ptr_only" checked> DiscountOnPTR only</label>
         <label><input type="radio" name="discount-type" value="total"> Total discount (PTR + Cash)</label>
       </div>
+    </div>
+    <div class="control-group">
+      <details class="entity-details">
+        <summary>Discount range (all checked by default)</summary>
+        <div class="select-all-row">
+          <button type="button" class="select-all-btn" id="counter-bucket-select-all">Select all</button>
+          <button type="button" class="select-all-btn" id="counter-bucket-select-none">Deselect all</button>
+        </div>
+        <div class="entity-list" id="counter-bucket-filter"></div>
+      </details>
     </div>
     <div class="control-group">
       <label class="group-label">Group table by</label>
@@ -212,6 +235,16 @@
       </div>
     </div>
     <div class="control-group">
+      <details class="entity-details">
+        <summary>Discount range (all checked by default)</summary>
+        <div class="select-all-row">
+          <button type="button" class="select-all-btn" id="np-bucket-select-all">Select all</button>
+          <button type="button" class="select-all-btn" id="np-bucket-select-none">Deselect all</button>
+        </div>
+        <div class="entity-list" id="np-bucket-filter"></div>
+      </details>
+    </div>
+    <div class="control-group">
       <label class="group-label">Show FY</label>
       <select id="np-fy-filter">
         <option value="all">All FYs</option>
@@ -258,6 +291,11 @@ let counterTableSort = { column: 'total', direction: 'desc' };
 let npTableSort = { column: 'total', direction: 'desc' };
 let divisionTotalsSort = { column: 'amount', direction: 'desc' };
 let divisionPeriodSort = { column: 'period', direction: 'asc' };
+// Which discount buckets the user currently wants to see. Drives the bar chart categories AND
+// which table columns exist -- deselected ranges are dropped entirely rather than shown as
+// empty columns, so "% of row total" is always relative to the ranges actually on screen.
+let counterVisibleBuckets = BUCKET_ORDER.slice();
+let npVisibleBuckets = BUCKET_ORDER.slice();
 
 const embedded = document.getElementById('report-data');
 if (embedded && embedded.textContent.trim()) {
@@ -304,7 +342,11 @@ function init() {
   setUpSelectAll('counter-division-select-all', 'counter-division-select-none', '.counter-division-checkbox', renderCounterTab);
   setUpSelectAll('division-entity-select-all', 'division-entity-select-none', '.division-entity-checkbox', renderDivisionTab);
   setUpSelectAll('np-division-select-all', 'np-division-select-none', '.np-division-checkbox', renderNpTab);
+  setUpSelectAll('counter-bucket-select-all', 'counter-bucket-select-none', '.counter-bucket-checkbox', renderCounterTab);
+  setUpSelectAll('np-bucket-select-all', 'np-bucket-select-none', '.np-bucket-checkbox', renderNpTab);
 
+  populateBucketFilter('counter-bucket-filter', 'counter-bucket-checkbox', renderCounterTab);
+  populateBucketFilter('np-bucket-filter', 'np-bucket-checkbox', renderNpTab);
   populateCounterDivisionFilter();
   populateFyOptions('counter-fy-filter', REPORT.counter_tab);
   renderCounterTab();
@@ -331,27 +373,69 @@ function renderMetaBanner() {
   const m = REPORT.meta;
 
   if (m.build_issues && m.build_issues.length) {
-    const errors = m.build_issues.filter(i => i.severity === 'error');
-    const warningsList = m.build_issues.filter(i => i.severity !== 'error');
+    // Ordered worst-first, and each issue carries the concrete next step from the build script.
+    // The point is that someone reading this knows what to DO, not just that something happened.
+    const rank = { error: 0, warning: 1, info: 2 };
+    const tagText = { error: 'Data affected', warning: 'Check this', info: 'For information' };
+    const issues = m.build_issues.slice().sort(
+      (a, b) => (rank[a.severity] ?? 1) - (rank[b.severity] ?? 1)
+    );
+    const counts = issues.reduce((acc, i) => {
+      acc[i.severity] = (acc[i.severity] || 0) + 1; return acc;
+    }, {});
+    const summaryBits = ['error', 'warning', 'info']
+      .filter(s => counts[s])
+      .map(s => counts[s] + ' ' + (s === 'error' ? 'affecting the numbers'
+        : s === 'warning' ? 'worth checking' : 'for information'));
+
     const el = document.createElement('div');
     el.className = 'error-banner';
-    let html = '<strong>Internal codebase issues hit while building this report'
-      + (errors.length ? ' (' + errors.length + ' likely mean some data is missing)' : '') + ':</strong><br>';
-    errors.forEach(i => { html += '&bull; <strong>' + escapeHtml(i.message) + '</strong><br>'; });
-    warningsList.forEach(i => { html += '&bull; <span class="issue-warning">' + escapeHtml(i.message) + '</span><br>'; });
+    let html = '<strong class="banner-heading">Build report — ' + issues.length +
+      ' issue' + (issues.length === 1 ? '' : 's') + ' found</strong>' +
+      '<span class="banner-sub">' + summaryBits.join(' &middot; ') + '</span>';
+    issues.forEach(i => {
+      const sev = rank[i.severity] !== undefined ? i.severity : 'warning';
+      const cls = sev === 'error' ? '' : (sev === 'info' ? 'issue-info' : 'issue-warning');
+      html += '<div class="issue ' + cls + '">' +
+        '<span class="issue-tag"><span>' + tagText[sev] + '</span></span>' +
+        escapeHtml(i.message);
+      if (i.action) {
+        html += '<span class="issue-action"><strong>What to do:</strong> ' + escapeHtml(i.action) + '</span>';
+      }
+      html += '</div>';
+    });
     el.innerHTML = html;
     document.getElementById('meta-banner-slot').appendChild(el);
   }
 
   const notes = [];
   if (m.row_counts.unclassified > 0) {
-    notes.push(m.row_counts.unclassified + ' row(s) had an unrecognized Order_Status (' + m.unclassified_statuses.join(', ') + ') — excluded from totals, shown here for visibility.');
+    let note = m.row_counts.unclassified.toLocaleString() + ' row(s) had an unrecognized Order_Status (' +
+      m.unclassified_statuses.join(', ') + ') — excluded from totals.';
+    if (m.unclassified_by_file) {
+      const byFile = Object.entries(m.unclassified_by_file)
+        .map(([f, entries]) => escapeHtml(f) + ' (' + entries.reduce((s, e) => s + e.rows, 0).toLocaleString() + ')');
+      if (byFile.length) note += ' From: ' + byFile.join(', ') + '.';
+    }
+    notes.push(note);
   }
   if (m.files_skipped && m.files_skipped.length) {
     notes.push(m.files_skipped.length + ' file(s) in data/ were skipped (no parseable period, no file_periods.csv entry): ' + m.files_skipped.join(', '));
   }
   if (m.duplicate_rows_conflicting > 0) {
-    notes.push(m.duplicate_rows_conflicting + ' order line(s) appear in multiple files with DIFFERENT values — kept all copies, needs manual review.');
+    const pairs = (m.conflict_file_pairs || []).slice(0, 3)
+      .map(p => escapeHtml(p.files.join(' + ')) + ' (' + p.lines.toLocaleString() + ')').join('; ');
+    if (m.conflict_policy === 'keep_latest') {
+      notes.push(m.duplicate_rows_conflicting.toLocaleString() + ' order line(s) appear in multiple files with ' +
+        'different values. Only the newest copy of each was kept (' + (m.conflict_extra_rows || 0).toLocaleString() +
+        ' older copies dropped)' + (pairs ? '. Overlaps: ' + pairs : '') + '.');
+    } else {
+      notes.push('<strong>Totals on every tab are inflated:</strong> ' + m.duplicate_rows_conflicting.toLocaleString() +
+        ' order line(s) appear in multiple files with different values, and all copies are being counted — ' +
+        'about ' + (m.conflict_extra_rows || 0).toLocaleString() + ' extra line(s), ' +
+        formatMoney(m.conflict_extra_amount || 0) + ' too much' + (pairs ? '. Overlaps: ' + pairs : '') +
+        '. Set DUPLICATE_CONFLICT_POLICY = "keep_latest" in scripts/config.py and rebuild to remove the double-count.');
+    }
   }
   if (!m.brand_master_file_present || m.valid_rows_with_unmapped_brand > 0) {
     notes.push(m.valid_rows_with_unmapped_brand + ' valid row(s) have no brand match yet (Unmapped) in brand_master.csv — Division tab brand-level views are partial until the full master list is loaded.');
@@ -374,6 +458,23 @@ function renderMetaBanner() {
   el.className = 'meta-banner';
   el.innerHTML = '<strong>Data notes:</strong><br>' + notes.map(n => '&bull; ' + n).join('<br>');
   document.getElementById('meta-banner-slot').appendChild(el);
+}
+
+function populateBucketFilter(containerId, checkboxClass, onChange) {
+  const container = document.getElementById(containerId);
+  container.innerHTML = BUCKET_ORDER.map(b =>
+    '<label><input type="checkbox" class="' + checkboxClass + '" value="' + escapeHtml(b) + '" checked> ' + escapeHtml(b) + '</label>'
+  ).join('');
+  container.querySelectorAll('.' + checkboxClass).forEach(cb => cb.addEventListener('change', onChange));
+}
+
+// If the column being sorted on just got filtered out, the sort would silently point at a column
+// that no longer exists -- fall back to Total instead of leaving the table in a stale order.
+function resetSortIfColumnHidden(sortState, visibleBuckets) {
+  if (sortState.column !== 'total' && !visibleBuckets.includes(sortState.column)) {
+    sortState.column = 'total';
+    sortState.direction = 'desc';
+  }
 }
 
 function populateFyOptions(selectId, records) {
@@ -403,21 +504,27 @@ function getCounterFilters() {
   const groupBy = document.getElementById('counter-group-by').value;
   const fy = document.getElementById('counter-fy-filter').value;
   const divisions = Array.from(document.querySelectorAll('.counter-division-checkbox:checked')).map(cb => cb.value);
-  return { ages, discountType, groupBy, fy, divisions };
+  const checkedBuckets = Array.from(document.querySelectorAll('.counter-bucket-checkbox:checked')).map(cb => cb.value);
+  // Re-derive from BUCKET_ORDER so the ranges stay in ascending order regardless of click order.
+  const buckets = BUCKET_ORDER.filter(b => checkedBuckets.includes(b));
+  return { ages, discountType, groupBy, fy, divisions, buckets };
 }
 
 function renderCounterTab() {
-  const { ages, discountType, groupBy, fy, divisions } = getCounterFilters();
+  const { ages, discountType, groupBy, fy, divisions, buckets } = getCounterFilters();
+  counterVisibleBuckets = buckets;
+  resetSortIfColumnHidden(counterTableSort, counterVisibleBuckets);
   const rows = REPORT.counter_tab.filter(r =>
     ages.includes(r.counter_age) && r.discount_type === discountType
     && (fy === 'all' || r.fy === fy)
     && divisions.includes(r.division)
+    && buckets.includes(r.bucket)
   );
 
   const bucketTotals = {};
-  BUCKET_ORDER.forEach(b => bucketTotals[b] = 0);
+  counterVisibleBuckets.forEach(b => bucketTotals[b] = 0);
   rows.forEach(r => { bucketTotals[r.bucket] = (bucketTotals[r.bucket] || 0) + r.amount; });
-  renderBarChart(document.getElementById('counter-bar-chart'), BUCKET_ORDER, BUCKET_ORDER.map(b => bucketTotals[b]));
+  renderBarChart(document.getElementById('counter-bar-chart'), counterVisibleBuckets, counterVisibleBuckets.map(b => bucketTotals[b]));
 
   counterGroupLabel = groupBy === 'division' ? 'Division' : 'SKU';
   document.getElementById('counter-table-title').textContent = 'Sales by ' + counterGroupLabel + ' x discount range';
@@ -436,8 +543,8 @@ function bucketSortValue(data, column) {
   return column === 'total' ? data.total : (data.buckets[column] || 0);
 }
 
-function renderSortableBucketHeaderRow(firstColLabel, sortState) {
-  const cols = BUCKET_ORDER.concat(['Total']);
+function renderSortableBucketHeaderRow(firstColLabel, sortState, visibleBuckets) {
+  const cols = visibleBuckets.concat(['Total']);
   const cells = cols.map(col => {
     const key = col === 'Total' ? 'total' : col;
     const arrow = sortState.column === key ? (sortState.direction === 'desc' ? ' ▾' : ' ▴') : '';
@@ -472,9 +579,9 @@ function renderFilteredCounterTable() {
   renderCounterTable(sortedEntities, counterGroupLabel);
 }
 
-function renderBucketTableRows(sortedEntities) {
+function renderBucketTableRows(sortedEntities, visibleBuckets) {
   return sortedEntities.map(([name, data]) => {
-    const cells = BUCKET_ORDER.map(b => {
+    const cells = visibleBuckets.map(b => {
       const v = data.buckets[b] || 0;
       const pct = data.total ? 100 * v / data.total : 0;
       return '<td><div class="cell-value">' + formatMoney(v) + '</div><div class="cell-pct">' + pct.toFixed(1) + '% of row total</div></td>';
@@ -497,8 +604,8 @@ function renderCounterTable(sortedEntities, groupLabel) {
     container.innerHTML = '<div class="empty-state">No data for this selection.</div>';
     return;
   }
-  let html = '<table><thead>' + renderSortableBucketHeaderRow(groupLabel, counterTableSort) + '</thead><tbody>' +
-    renderBucketTableRows(sortedEntities) + '</tbody></table>';
+  let html = '<table><thead>' + renderSortableBucketHeaderRow(groupLabel, counterTableSort, counterVisibleBuckets) + '</thead><tbody>' +
+    renderBucketTableRows(sortedEntities, counterVisibleBuckets) + '</tbody></table>';
   if (sortedEntities.length === 50) html += '<div class="empty-state">Showing top 50 by ' + counterTableSort.column + ' (' + counterTableSort.direction + 'ending).</div>';
   container.innerHTML = html;
   attachRowExpandToggle(container);
@@ -520,14 +627,18 @@ function renderNpTab() {
   const discountType = document.querySelector('input[name="np-discount-type"]:checked').value;
   const fy = document.getElementById('np-fy-filter').value;
   const divisions = Array.from(document.querySelectorAll('.np-division-checkbox:checked')).map(cb => cb.value);
+  const checkedBuckets = Array.from(document.querySelectorAll('.np-bucket-checkbox:checked')).map(cb => cb.value);
+  npVisibleBuckets = BUCKET_ORDER.filter(b => checkedBuckets.includes(b));
+  resetSortIfColumnHidden(npTableSort, npVisibleBuckets);
   const rows = REPORT.np_discounts_tab.filter(r =>
     r.discount_type === discountType && (fy === 'all' || r.fy === fy) && divisions.includes(r.division)
+    && npVisibleBuckets.includes(r.bucket)
   );
 
   const bucketTotals = {};
-  BUCKET_ORDER.forEach(b => bucketTotals[b] = 0);
+  npVisibleBuckets.forEach(b => bucketTotals[b] = 0);
   rows.forEach(r => { bucketTotals[r.bucket] = (bucketTotals[r.bucket] || 0) + r.amount; });
-  renderBarChart(document.getElementById('np-bar-chart'), BUCKET_ORDER, BUCKET_ORDER.map(b => bucketTotals[b]));
+  renderBarChart(document.getElementById('np-bar-chart'), npVisibleBuckets, npVisibleBuckets.map(b => bucketTotals[b]));
 
   npByEntity = {};
   rows.forEach(r => {
@@ -556,8 +667,8 @@ function renderNpTable(sortedEntities) {
     container.innerHTML = '<div class="empty-state">No new-product sales for this selection yet.</div>';
     return;
   }
-  let html = '<table><thead>' + renderSortableBucketHeaderRow('SKU', npTableSort) + '</thead><tbody>' +
-    renderBucketTableRows(sortedEntities) + '</tbody></table>';
+  let html = '<table><thead>' + renderSortableBucketHeaderRow('SKU', npTableSort, npVisibleBuckets) + '</thead><tbody>' +
+    renderBucketTableRows(sortedEntities, npVisibleBuckets) + '</tbody></table>';
   if (sortedEntities.length === 50) html += '<div class="empty-state">Showing top 50 by ' + npTableSort.column + ' (' + npTableSort.direction + 'ending).</div>';
   container.innerHTML = html;
   attachRowExpandToggle(container);

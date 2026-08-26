@@ -24,11 +24,17 @@ import config
 BUILD_ISSUES = []
 
 
-def report_issue(severity, message):
-    """severity: 'error' (some real data was skipped/lost) or 'warning' (handled, but worth a
-    look). Always also prints immediately, so the terminal output stays informative too."""
-    BUILD_ISSUES.append({"severity": severity, "message": message})
+def report_issue(severity, message, action=None):
+    """severity: 'error' (some real data was skipped/lost), 'warning' (handled, but worth a
+    look), or 'info' (a fact about this build worth stating, not a problem).
+
+    `action` is the concrete next step -- the thing to actually DO about it. An issue nobody can
+    act on is just noise, so anything worth reporting should be able to say what to do about it.
+    Always also prints immediately, so the terminal output stays informative too."""
+    BUILD_ISSUES.append({"severity": severity, "message": message, "action": action})
     print(f"  {severity.upper()}: {message}", flush=True)
+    if action:
+        print(f"    -> WHAT TO DO: {action}", flush=True)
 
 
 def progress_bar(current, total, width=24):
@@ -125,19 +131,31 @@ def _is_reference_file(filename):
     return any(lower.startswith(prefix.lower()) for prefix in config.NON_ORDER_FILE_PREFIXES)
 
 
+def _is_editor_lock_file(filename):
+    """Excel/LibreOffice lock files ('~$Foo.xlsx') sit next to the real file whenever it's open
+    in the editor. They hold no data, and Excel keeps them locked, so trying to read one throws
+    PermissionError. Skipping them silently is correct -- reporting them as missed data is not."""
+    lower = filename.lower()
+    return any(lower.startswith(prefix.lower()) for prefix in config.IGNORED_FILENAME_PREFIXES)
+
+
 def discover_order_files():
     """Every .csv/.xlsx/.xlsb in data/ that isn't a known reference file. Returns
     (found, skipped): found is a list of dicts {path, filename, period_start, period_end,
     period_source}; skipped is a list of filenames with no parseable period."""
     if not config.DATA_DIR.exists():
-        return []
+        return [], []  # callers unpack (found, skipped) -- a bare [] would raise here
 
     manifest = load_file_periods_manifest()
     found = []
     skipped = []
+    lock_files_ignored = []
 
     for path in sorted(config.DATA_DIR.iterdir()):
         if path.suffix.lower() not in (".csv", ".xlsx", ".xlsb"):
+            continue
+        if _is_editor_lock_file(path.name):
+            lock_files_ignored.append(path.name)
             continue
         if _is_reference_file(path.name):
             continue
@@ -161,6 +179,12 @@ def discover_order_files():
             "period_source": period_source,
         })
 
+    if lock_files_ignored:
+        print(
+            f"  Note: ignored {len(lock_files_ignored)} Excel lock file(s) (no data in them, "
+            f"they just mean the real file is open in Excel): {lock_files_ignored}",
+            flush=True,
+        )
     if skipped:
         warnings.warn(
             f"Skipped {len(skipped)} file(s) in data/ with no parseable period and no "
@@ -186,6 +210,65 @@ def _read_one_file(path):
     raise last_error
 
 
+# Which metric silently breaks if a given critical column goes missing -- so the warning can say
+# what actually goes wrong instead of just naming the column.
+COLUMN_IMPACT = {
+    "Order_Number": "duplicate detection across overlapping files",
+    "OrdPlaced_Date": "the transaction date (falls back to Order_InitiatedDate)",
+    "Order_InitiatedDate": "the fallback transaction date, used when OrdPlaced_Date is blank",
+    "Doctor_Code": "the New/Old counter split",
+    "Item_Code": "SKU grouping, and both reference-file joins",
+    "Item_Description": "SKU names in the tables",
+    "Division_Name": "every Division filter and the whole Division Trend tab",
+    "Quantity": "Gross Sales (PTR x Quantity), so Medvol % and Net Sales %",
+    "Amount": "ALL sales figures on every tab",
+    "InvoiceAmount": "Net Sales % on the Division Trend tab",
+    "Order_Status": "valid/excluded row classification -- rows can't be filtered at all",
+    "PTR": "Gross Sales, so Medvol % and Net Sales %",
+    "DiscountOnPTR": "the 'DiscountOnPTR only' discount buckets",
+    "Cash_Discount": "the compounded 'Total discount' buckets",
+}
+
+
+def _check_columns(filename, df):
+    """Reports missing columns by IMPACT, not by count. A file missing a column no logic reads
+    is fine and shouldn't cost the user a moment's attention; a file missing 'Amount' is a
+    five-alarm fire. Previously both looked identical in the output."""
+    present = set(df.columns)
+    missing_critical = [c for c in config.CRITICAL_COLUMNS if c not in present]
+    missing_other = (set(config.EXPECTED_COLUMNS) - present
+                     - set(config.CRITICAL_COLUMNS) - config.KNOWN_OPTIONAL_COLUMNS)
+
+    if len(missing_critical) >= len(config.CRITICAL_COLUMNS) / 2:
+        report_issue(
+            "error",
+            f"MOST/ALL COLUMNS MISSING in '{filename}' (found columns: {list(df.columns)}) -- "
+            f"likely wrong sheet, a shifted header row, or an empty file. Its data is probably "
+            f"NOT correctly included in this report.",
+            action=f"Open '{filename}' and check that row 1 is the real header row and that the "
+                   f"data is on the first sheet.",
+        )
+    elif missing_critical:
+        impacts = "; ".join(f"{c} (breaks {COLUMN_IMPACT.get(c, 'part of the report')})"
+                            for c in missing_critical)
+        report_issue(
+            "error",
+            f"'{filename}' is missing {len(missing_critical)} column(s) the report actually "
+            f"uses: {impacts}. Rows from this file will be blank/zero for those metrics.",
+            action=f"Re-export '{filename}' with these columns included: "
+                   f"{', '.join(missing_critical)}.",
+        )
+
+    if missing_other:
+        report_issue(
+            "warning",
+            f"'{filename}' is missing {sorted(missing_other)} -- no calculation in this report "
+            f"reads those, so no number is affected. Noting it only in case the export changed "
+            f"shape unexpectedly.",
+            action="No action needed unless you expected those columns to be there.",
+        )
+
+
 def load_order_lines():
     """Loads every discovered order file, stacks them, dedupes rows that appear identically
     in more than one overlapping file. Returns (DataFrame, meta_dict)."""
@@ -203,22 +286,15 @@ def load_order_lines():
             report_issue(
                 "error",
                 f"MISSED ENTIRE FILE '{info['filename']}' -- could not be read at all "
-                f"({type(exc).__name__}: {exc}). None of its data is included in this report."
+                f"({type(exc).__name__}: {exc}). None of its data is included in this report.",
+                action=("Close the file in Excel and rerun -- Excel locks a workbook while it's "
+                        "open." if isinstance(exc, PermissionError) else
+                        f"Open '{info['filename']}' and check it isn't corrupt or password-protected."),
             )
             files_failed.append(info["filename"])
             continue
         elapsed = time.perf_counter() - t0
-        missing_cols = set(config.EXPECTED_COLUMNS) - set(df.columns)
-        if missing_cols:
-            if len(missing_cols) > len(config.EXPECTED_COLUMNS) / 2:
-                report_issue(
-                    "error",
-                    f"MOST/ALL COLUMNS MISSING in '{info['filename']}' (found columns: "
-                    f"{list(df.columns)}) -- likely wrong sheet, shifted header, or an empty "
-                    f"file. Its data is probably NOT correctly included in this report."
-                )
-            else:
-                report_issue("warning", f"'{info['filename']}' is missing some expected columns: {sorted(missing_cols)}")
+        _check_columns(info["filename"], df)
         df["_source_file"] = info["filename"]
         df["_period_start"] = str(info["period_start"])
         df["_period_end"] = str(info["period_end"])
@@ -229,6 +305,8 @@ def load_order_lines():
         return pd.DataFrame(columns=config.EXPECTED_COLUMNS), {
             "files_loaded": [], "files_skipped": skipped_files, "files_failed": files_failed,
             "duplicate_rows_dropped": 0, "duplicate_rows_conflicting": 0,
+            "conflicting_keys_sample": [], "conflict_policy": config.DUPLICATE_CONFLICT_POLICY,
+            "conflict_extra_rows": 0, "conflict_extra_amount": 0.0, "conflict_file_pairs": [],
         }
 
     print("Sanitizing: stripping stray whitespace (different export batches format cells differently) ...", flush=True)
@@ -243,7 +321,14 @@ def load_order_lines():
     dup_key = [config.SKU_ID_COLUMN, "Order_Number"]
     value_check_cols = ["Amount", "InvoiceAmount", "Quantity", "DiscountOnPTR"]
 
+    # Which file covers the latest months -- used by the "keep_latest" conflict policy, and to
+    # describe the overlap in plain language either way.
+    file_recency = {info["filename"]: str(info["period_end"]) for info in file_infos}
+
     conflicting_keys = []
+    conflict_file_pairs = {}
+    conflict_extra_rows = 0
+    conflict_extra_amount = 0.0
     rows_to_drop = []
     for key, group in combined.groupby(dup_key):
         if len(group) <= 1:
@@ -253,7 +338,17 @@ def load_order_lines():
         distinct_value_rows = group[value_check_cols].drop_duplicates()
         if len(distinct_value_rows) > 1:
             conflicting_keys.append(key)
-            continue  # genuine disagreement -- keep all copies, flag it, don't guess
+            files_involved = tuple(sorted(group["_source_file"].unique()))
+            conflict_file_pairs[files_involved] = conflict_file_pairs.get(files_involved, 0) + 1
+            # What keeping every copy actually costs: the extra copies beyond the first, and
+            # the rupee value they add on top. This is the double-count, quantified.
+            amounts = pd.to_numeric(group["Amount"], errors="coerce").fillna(0.0)
+            conflict_extra_rows += len(group) - 1
+            conflict_extra_amount += float(amounts.sum() - amounts.iloc[0])
+            if config.DUPLICATE_CONFLICT_POLICY == "keep_latest":
+                keep_idx = group["_source_file"].map(file_recency).idxmax()
+                rows_to_drop.extend([i for i in group.index if i != keep_idx])
+            continue
         rows_to_drop.extend(group.index[1:].tolist())
 
     deduped = combined.drop(index=rows_to_drop)
@@ -264,15 +359,37 @@ def load_order_lines():
             "error",
             f"MISSED {len(skipped_files)} FILE(S) -- no parseable period in the filename and no "
             f"file_periods.csv entry, so they were never even opened: {skipped_files}. None of "
-            f"their data is included in this report."
+            f"their data is included in this report.",
+            action=f"Either rename them to match the \"Apr'23 to June'23\" pattern, or add a row "
+                   f"to data/file_periods.csv giving each one a period_start and period_end.",
         )
     if conflicting_keys:
-        report_issue(
-            "warning",
-            f"{len(conflicting_keys)} order line(s) appear in more than one file with DIFFERENT "
-            f"values -- kept all copies rather than guessing which is right, needs manual review. "
-            f"Sample keys: {conflicting_keys[:10]}"
+        overlap_desc = "; ".join(
+            f"{' + '.join(files)}: {count:,} line(s)"
+            for files, count in sorted(conflict_file_pairs.items(), key=lambda kv: -kv[1])[:5]
         )
+        if config.DUPLICATE_CONFLICT_POLICY == "keep_latest":
+            report_issue(
+                "info",
+                f"{len(conflicting_keys):,} order line(s) appear in more than one file with "
+                f"DIFFERENT values. Policy is 'keep_latest', so the copy from the newest export "
+                f"was kept and {conflict_extra_rows:,} older copies (Rs {conflict_extra_amount:,.0f}) "
+                f"were dropped. Overlaps: {overlap_desc}",
+                action="Set DUPLICATE_CONFLICT_POLICY = \"keep_all\" in scripts/config.py if you "
+                       "would rather keep every copy and reconcile by hand.",
+            )
+        else:
+            report_issue(
+                "error",
+                f"DOUBLE-COUNTING: {len(conflicting_keys):,} order line(s) appear in more than one "
+                f"file with DIFFERENT Amount/Quantity/discount values (a later export usually "
+                f"restates an earlier order). Policy is 'keep_all', so every copy is being counted "
+                f"-- inflating totals by {conflict_extra_rows:,} extra line(s), about "
+                f"Rs {conflict_extra_amount:,.0f}. Overlaps: {overlap_desc}",
+                action="Set DUPLICATE_CONFLICT_POLICY = \"keep_latest\" in scripts/config.py and "
+                       "rerun to keep only the newest copy of each line, or run "
+                       "scripts/inspect_duplicates.py to review them by hand first.",
+            )
 
     loaded_filenames = [info["filename"] for info in file_infos if info["filename"] not in files_failed]
     meta = {
@@ -282,6 +399,13 @@ def load_order_lines():
         "duplicate_rows_dropped": len(rows_to_drop),
         "duplicate_rows_conflicting": len(conflicting_keys),
         "conflicting_keys_sample": conflicting_keys[:10],
+        "conflict_policy": config.DUPLICATE_CONFLICT_POLICY,
+        "conflict_extra_rows": conflict_extra_rows,
+        "conflict_extra_amount": round(conflict_extra_amount, 2),
+        "conflict_file_pairs": [
+            {"files": list(files), "lines": count}
+            for files, count in sorted(conflict_file_pairs.items(), key=lambda kv: -kv[1])[:10]
+        ],
     }
     return deduped, meta
 

@@ -367,6 +367,24 @@ def main():
         ].apply(lambda s: s if isinstance(s, str) and s.strip() else "(blank)")
         unclassified_status_counts = unclassified_status_display.value_counts(dropna=False).to_dict()
         unclassified_statuses = sorted(unclassified_status_counts.keys())
+        # Trace each unrecognized status back to the file it came from. Values like
+        # "PTR - Price" or "Revised price = Invoice amt / Qty" are not order statuses at all --
+        # they're legend/notes rows that got exported into the data, and knowing WHICH file
+        # carries them is the difference between an actionable report and a shrug.
+        unclassified_by_file = {}
+        unclassified_mask = orders_df["_status_class"] == "Unclassified"
+        if unclassified_mask.any():
+            for (filename, status), count in (
+                orders_df.loc[unclassified_mask]
+                .assign(_disp=unclassified_status_display)
+                .groupby(["_source_file", "_disp"], observed=True)
+                .size().items()
+            ):
+                unclassified_by_file.setdefault(filename, []).append(
+                    {"status": status, "rows": int(count)}
+                )
+            for entries in unclassified_by_file.values():
+                entries.sort(key=lambda e: -e["rows"])
         valid_df = orders_df[orders_df["_status_class"] == "Valid"].copy()
 
         # Per-file breakdown -- without this, "why is month X missing from Division Trend" or
@@ -384,6 +402,41 @@ def main():
                 "valid_rows_undated": int(valid_group["_txn_date"].isna().sum()),
             })
         per_file_summary.sort(key=lambda r: r["file"])
+
+        # Files whose cancelled/rejected share is wildly off the corpus norm are usually a
+        # differently-prepared export -- most often one already pre-filtered to invoiced orders.
+        # That is not necessarily wrong, but it means those months aren't directly comparable to
+        # the rest, and silently mixing them is exactly how a trend chart lies.
+        overall_total = sum(r["total_rows"] for r in per_file_summary)
+        overall_excluded = sum(r["excluded_rows"] for r in per_file_summary)
+        overall_rate = overall_excluded / overall_total if overall_total else 0.0
+        tol = config.EXCLUSION_RATE_ANOMALY_TOLERANCE
+        anomalous_files = []
+        if overall_rate > 0:
+            for r in per_file_summary:
+                if r["total_rows"] < 1000:
+                    continue  # too small for the rate to mean anything
+                rate = r["excluded_rows"] / r["total_rows"]
+                if rate < overall_rate * (1 - tol) or rate > overall_rate * (1 + tol):
+                    anomalous_files.append({
+                        "file": r["file"],
+                        "rate": round(100 * rate, 2),
+                        "rows": r["total_rows"],
+                    })
+        if anomalous_files:
+            listed = "; ".join(
+                f"{a['file']} ({a['rate']}% of {a['rows']:,} rows)" for a in anomalous_files
+            )
+            db.report_issue(
+                "warning",
+                f"{len(anomalous_files)} file(s) have a cancelled/rejected rate far from the "
+                f"{100 * overall_rate:.1f}% corpus average: {listed}. A rate of 0% usually means "
+                f"that export was already filtered to invoiced orders only, so its months carry "
+                f"no cancellations while every other month does.",
+                action="Confirm with whoever produced those exports whether they were pre-filtered. "
+                       "If they were, the months they cover aren't directly comparable to the rest "
+                       "on any cancellation-sensitive figure.",
+            )
 
         nan_amount_rows = int(valid_df["_amount"].isna().sum())
         nan_invoice_rows = int(valid_df["_invoice_amount"].isna().sum())
@@ -417,12 +470,35 @@ def main():
         new_product_skus_matched = len(new_product_skus & valid_skus_present)
         new_product_skus_unmatched = len(new_product_skus) - new_product_skus_matched
         if new_product_skus_unmatched:
+            unmatched_sample = sorted(new_product_skus - valid_skus_present)[:5]
+            matched_sample = sorted(new_product_skus & valid_skus_present)[:5]
+            # Report raw counts, not percentages: 1 match out of 226 renders as "0%", which would
+            # read as "nothing matched" right next to advice saying the format is fine.
+            if new_product_skus_matched == 0:
+                sku_severity, sku_advice = "error", (
+                    "NOTHING matched, so the NP Discounts tab is empty and the SKU join is broken. "
+                    "Compare an unmatched code above against a real Item_Code from the order data "
+                    "-- they are almost certainly formatted differently."
+                )
+            elif new_product_skus_matched < 0.2 * len(new_product_skus):
+                sku_severity, sku_advice = "warning", (
+                    f"Only {new_product_skus_matched:,} of {len(new_product_skus):,} matched. That "
+                    f"is low enough to be suspicious: check whether the unmatched codes above are "
+                    f"formatted like the matched ones. If they are, these products simply haven't "
+                    f"sold yet."
+                )
+            else:
+                sku_severity, sku_advice = "warning", (
+                    f"{new_product_skus_matched:,} of {len(new_product_skus):,} matched, so the code "
+                    f"format is right. The remainder have genuinely not sold yet -- expected for a "
+                    f"new-products list, and they will appear as soon as they do."
+                )
             db.report_issue(
-                "warning",
+                sku_severity,
                 f"{new_product_skus_unmatched:,}/{len(new_product_skus):,} SKUs on the new-products "
-                f"list (item_brand_mapping.csv) have NO matching valid order rows -- either they "
-                f"genuinely haven't sold yet, or the SKU codes don't match Item_Code in the order "
-                f"data (check for formatting drift)."
+                f"list (item_brand_mapping.csv) have NO matching valid order rows. "
+                f"Unmatched examples: {unmatched_sample}. Matched examples: {matched_sample}.",
+                action=sku_advice,
             )
 
         new_counters_registered_total = 0
@@ -434,18 +510,68 @@ def main():
             new_counters_matched_to_orders = len(registered_counter_codes & valid_counter_codes_present)
             new_counters_unmatched = new_counters_registered_total - new_counters_matched_to_orders
             if new_counters_unmatched:
+                unmatched_c = sorted(registered_counter_codes - valid_counter_codes_present)[:5]
+                matched_c = sorted(registered_counter_codes & valid_counter_codes_present)[:5]
+                # The right advice depends entirely on whether ANY code matched. If a good share
+                # did, the formats obviously agree and the rest simply haven't ordered. If none
+                # did, the join is broken and the New/Old split is meaningless -- opposite
+                # conclusions, so don't hardcode one of them.
+                matched_n = new_counters_matched_to_orders
+                total_n = new_counters_registered_total
+                if matched_n == 0:
+                    severity, advice = "error", (
+                        "NOTHING matched, so the New/Old counter split is not working at all and "
+                        "every counter is showing as 'Old'. The codes in Allocated_CounterCode "
+                        "and Doctor_Code are almost certainly formatted differently -- compare "
+                        "the unmatched examples above against a Doctor_Code from the order data."
+                    )
+                elif matched_n < 0.2 * total_n:
+                    severity, advice = "warning", (
+                        f"Only {matched_n:,} of {total_n:,} matched. Compare the two example lists "
+                        f"-- if they look like different formats, the New/Old split is missing most "
+                        f"of its counters. If they look alike, the rest just haven't ordered yet."
+                    )
+                else:
+                    severity, advice = "warning", (
+                        f"{matched_n:,} of {total_n:,} matched, so the code formats agree. The rest "
+                        f"are most likely counters registered but not yet ordering -- expected, "
+                        f"not a bug."
+                    )
                 db.report_issue(
-                    "warning",
+                    severity,
                     f"{new_counters_unmatched:,}/{new_counters_registered_total:,} counters on the "
-                    f"new-counters list (Allocated_CounterCode) have NO matching valid order rows -- "
-                    f"either they genuinely haven't ordered yet, or the counter codes don't match "
-                    f"Doctor_Code in the order data (check for formatting drift)."
+                    f"new-counters list (Allocated_CounterCode) have NO matching valid order rows. "
+                    f"Unmatched examples: {unmatched_c}. Matched examples: {matched_c}.",
+                    action=advice,
                 )
 
     if unclassified_status_counts:
         print(f"  Unclassified Order_Status breakdown ({sum(unclassified_status_counts.values()):,} rows total):", flush=True)
         for status, count in sorted(unclassified_status_counts.items(), key=lambda kv: -kv[1])[:20]:
             print(f"    {count:>10,}  {status!r}", flush=True)
+        for filename, entries in sorted(unclassified_by_file.items()):
+            shown = ", ".join(f"{e['rows']:,}x {e['status']!r}" for e in entries[:6])
+            print(f"      from {filename}: {shown}", flush=True)
+
+        # Some unrecognized values aren't statuses at all -- they're spreadsheet legend/notes
+        # text sitting in the Order_Status column, which means those rows are junk rows rather
+        # than real orders with an unusual status. Worth calling out separately.
+        junk_like = [s for s in unclassified_statuses
+                     if s != "(blank)" and (len(s) > 25 or "=" in s or "%" in s)]
+        if junk_like:
+            owning_files = sorted(
+                f for f, entries in unclassified_by_file.items()
+                if any(e["status"] in junk_like for e in entries)
+            )
+            db.report_issue(
+                "warning",
+                f"{len(junk_like)} value(s) in the Order_Status column aren't order statuses at "
+                f"all -- they look like legend/notes text pasted into the data: {junk_like}. "
+                f"Found in: {owning_files}. Those rows were counted as Unclassified and left out "
+                f"of every total.",
+                action=f"Open {owning_files} and delete the stray notes/legend rows sitting below "
+                       f"or beside the real data, then rerun the build.",
+            )
 
     print(f"  Per-file breakdown (total / valid / excluded / unclassified / valid-but-undated):", flush=True)
     name_width = max((len(r["file"]) for r in per_file_summary), default=10)
@@ -473,6 +599,8 @@ def main():
                 "unclassified": int(status_counts.get("Unclassified", 0)),
             },
             "unclassified_statuses": unclassified_statuses,
+            "unclassified_by_file": unclassified_by_file,
+            "exclusion_rate_anomalies": anomalous_files,
             "valid_rows_missing_amount": nan_amount_rows,
             "valid_rows_missing_invoice_amount": nan_invoice_rows,
             "valid_rows_with_unmapped_brand": unmapped_brand_rows,
@@ -481,6 +609,10 @@ def main():
             "duplicate_rows_dropped": load_meta["duplicate_rows_dropped"],
             "duplicate_rows_conflicting": load_meta["duplicate_rows_conflicting"],
             "conflicting_keys_sample": load_meta["conflicting_keys_sample"],
+            "conflict_policy": load_meta["conflict_policy"],
+            "conflict_extra_rows": load_meta["conflict_extra_rows"],
+            "conflict_extra_amount": load_meta["conflict_extra_amount"],
+            "conflict_file_pairs": load_meta["conflict_file_pairs"],
             "new_products_files": new_products_meta["new_products_files"],
             "duplicate_new_product_codes": new_products_meta["duplicate_new_product_codes"],
             "new_product_sku_count": len(new_product_skus),
