@@ -403,6 +403,48 @@ def main():
             })
         per_file_summary.sort(key=lambda r: r["file"])
 
+        # Does each file actually contain the months its FILENAME claims? Nothing checked this
+        # before, and it is the root cause of the biggest problem in this dataset: a file named
+        # "Aug'25 to Oct'25" that really holds Aug-Dec silently duplicates every Nov and Dec
+        # order against the dedicated Nov and Dec files. The filename drives the period used for
+        # dedup ordering and coverage reporting, so a wrong name quietly corrupts both.
+        filename_period_mismatches = []
+        for filename, group in orders_df.groupby("_source_file"):
+            dated = group["_txn_date"].dropna()
+            if dated.empty:
+                continue
+            try:
+                declared_start = pd.Period(group["_period_start"].iloc[0], freq="M")
+                declared_end = pd.Period(group["_period_end"].iloc[0], freq="M")
+            except (ValueError, TypeError):
+                continue
+            actual = dated.dt.to_period("M")
+            outside = actual[(actual < declared_start) | (actual > declared_end)]
+            if len(outside) <= 0.01 * len(dated):
+                continue  # a handful of stragglers is normal; a systematic mismatch is not
+            extra_months = sorted(str(m) for m in outside.unique())
+            filename_period_mismatches.append({
+                "file": filename,
+                "declared": f"{declared_start}..{declared_end}",
+                "actual": f"{actual.min()}..{actual.max()}",
+                "rows_outside": int(len(outside)),
+                "share_outside": round(100 * len(outside) / len(dated), 1),
+                "unexpected_months": extra_months[:12],
+            })
+        for mm in filename_period_mismatches:
+            db.report_issue(
+                "error",
+                f"FILENAME DOES NOT MATCH CONTENTS: '{mm['file']}' is named for "
+                f"{mm['declared']} but actually contains data from {mm['actual']} -- "
+                f"{mm['rows_outside']:,} row(s) ({mm['share_outside']}%) fall outside the months "
+                f"its name claims, in {mm['unexpected_months']}. If another file also covers "
+                f"those months, every order in them is being counted twice.",
+                action=f"Confirm what '{mm['file']}' is meant to cover. If the name is wrong, "
+                       f"rename it (or add a row to data/file_periods.csv giving its real "
+                       f"period_start/period_end). If the extra months are meant to be there, "
+                       f"remove the other file(s) covering the same months.",
+            )
+
         # Files whose cancelled/rejected share is wildly off the corpus norm are usually a
         # differently-prepared export -- most often one already pre-filtered to invoiced orders.
         # That is not necessarily wrong, but it means those months aren't directly comparable to
@@ -556,8 +598,16 @@ def main():
         # Some unrecognized values aren't statuses at all -- they're spreadsheet legend/notes
         # text sitting in the Order_Status column, which means those rows are junk rows rather
         # than real orders with an unusual status. Worth calling out separately.
+        # Real statuses are plain word phrases ("Order Placed", "Waiting for FF Approval").
+        # Legend/notes text gives itself away with arithmetic characters, digits, or a spaced
+        # " - " separator. Requiring the hyphen to be spaced avoids flagging a genuine status
+        # like "Non-Invoiced".
+        def _looks_like_notes(s):
+            return (len(s) > 25 or any(c in s for c in "=%/")
+                    or any(c.isdigit() for c in s) or " - " in s)
+
         junk_like = [s for s in unclassified_statuses
-                     if s != "(blank)" and (len(s) > 25 or "=" in s or "%" in s)]
+                     if s != "(blank)" and _looks_like_notes(s)]
         if junk_like:
             owning_files = sorted(
                 f for f, entries in unclassified_by_file.items()
@@ -601,6 +651,7 @@ def main():
             "unclassified_statuses": unclassified_statuses,
             "unclassified_by_file": unclassified_by_file,
             "exclusion_rate_anomalies": anomalous_files,
+            "filename_period_mismatches": filename_period_mismatches,
             "valid_rows_missing_amount": nan_amount_rows,
             "valid_rows_missing_invoice_amount": nan_invoice_rows,
             "valid_rows_with_unmapped_brand": unmapped_brand_rows,

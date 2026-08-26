@@ -325,6 +325,16 @@ def load_order_lines():
     # describe the overlap in plain language either way.
     file_recency = {info["filename"]: str(info["period_end"]) for info in file_infos}
 
+    # IMPORTANT: (Item_Code, Order_Number) is NOT guaranteed unique within a single file -- the
+    # same SKU can appear as two separate lines on one order (different batch, scheme, or
+    # stockist). So "keep one row per key" is the wrong rule: it would silently delete a
+    # legitimate second line. The right rule is "keep every row from ONE file, drop the other
+    # files' copies" -- which collapses to keeping 1 row in the ordinary 1-line-per-file case,
+    # and correctly keeps both lines when an order really does list a SKU twice.
+    def _keep_only_latest_file(group):
+        latest = max(group["_source_file"].unique(), key=lambda f: file_recency.get(f, ""))
+        return group.index[group["_source_file"] != latest].tolist()
+
     conflicting_keys = []
     conflict_file_pairs = {}
     conflict_extra_rows = 0
@@ -334,22 +344,27 @@ def load_order_lines():
         if len(group) <= 1:
             continue
         if group["_source_file"].nunique() <= 1:
-            continue  # duplicate key within a single file's own data, not a file-overlap issue
+            continue  # repeated key within one file's own data -- a real multi-line order, keep it
         distinct_value_rows = group[value_check_cols].drop_duplicates()
         if len(distinct_value_rows) > 1:
             conflicting_keys.append(key)
             files_involved = tuple(sorted(group["_source_file"].unique()))
             conflict_file_pairs[files_involved] = conflict_file_pairs.get(files_involved, 0) + 1
-            # What keeping every copy actually costs: the extra copies beyond the first, and
-            # the rupee value they add on top. This is the double-count, quantified.
+            # What keeping every copy actually costs. Measured against the copy set we WOULD
+            # keep (the latest file's rows), not against a single row -- otherwise a legitimate
+            # two-line order would be reported as if one of its lines were duplicate money.
+            latest = max(group["_source_file"].unique(), key=lambda f: file_recency.get(f, ""))
+            kept = group[group["_source_file"] == latest]
             amounts = pd.to_numeric(group["Amount"], errors="coerce").fillna(0.0)
-            conflict_extra_rows += len(group) - 1
-            conflict_extra_amount += float(amounts.sum() - amounts.iloc[0])
+            kept_amounts = pd.to_numeric(kept["Amount"], errors="coerce").fillna(0.0)
+            conflict_extra_rows += len(group) - len(kept)
+            conflict_extra_amount += float(amounts.sum() - kept_amounts.sum())
             if config.DUPLICATE_CONFLICT_POLICY == "keep_latest":
-                keep_idx = group["_source_file"].map(file_recency).idxmax()
-                rows_to_drop.extend([i for i in group.index if i != keep_idx])
+                rows_to_drop.extend(_keep_only_latest_file(group))
             continue
-        rows_to_drop.extend(group.index[1:].tolist())
+        # Values agree across files, so the copies are interchangeable -- but keep the whole
+        # row set from one file rather than a single row, for the multi-line reason above.
+        rows_to_drop.extend(_keep_only_latest_file(group))
 
     deduped = combined.drop(index=rows_to_drop)
     print(f"  done in {time.perf_counter() - t0:.1f}s ({len(deduped):,} rows after dedup)", flush=True)

@@ -167,6 +167,28 @@ of each, as actually implemented:
   visible instead of abstract. On the real dataset this is ~112k lines, which is why the
   default's inflation is reported at `error` severity rather than as a passing note.
 
+- **A file whose contents don't match its filename — now detected.** The filename drives each
+  file's period, which in turn drives dedup ordering and coverage reporting, so a wrong name
+  quietly corrupts both. `build_report_data` now compares every file's actual transaction
+  months against the period its name declares and raises `FILENAME DOES NOT MATCH CONTENTS`
+  when more than 1% of rows fall outside (the threshold tolerates a few stragglers; a
+  systematic mismatch fires). This is the root cause of the real dataset's largest problem:
+  a file named `Aug'25 to Oct'25` holding roughly five months, whose Nov/Dec orders were then
+  counted a second time against the dedicated Nov and Dec files — ~112k lines, ~Rs 68 crore.
+  Fixing the filename is the correct remedy; `DUPLICATE_CONFLICT_POLICY = "keep_latest"` only
+  treats the symptom.
+
+- **`(Item_Code, Order_Number)` is NOT a unique row key — dedup rewritten 2026-08-26.** The
+  loader has always skipped repeated keys *within* one file, i.e. it accepts that a SKU can
+  appear as two separate lines on one order (different batch, scheme, or stockist). But the
+  cross-file dedup contradicted that, keeping `group.index[1:]` — one row per key. For an order
+  legitimately listing a SKU twice and present in two files (4 rows), that kept 1 and **deleted
+  a real order line**. The rule is now "keep every row from ONE file, drop the other files'
+  copies", which collapses to keeping 1 row in the ordinary case and correctly keeps both lines
+  otherwise. The conflict-cost figure is measured the same way, so a legitimate second line is
+  never reported as duplicate money. `inspect_duplicates.py` now opens by stating outright
+  whether the key repeats within any file, so this assumption is checkable rather than assumed.
+
 - **Editor lock files misreported as missing data — fixed 2026-08-26.** Excel writes a
   `~$Name.xlsx` owner file (~165 bytes, no data) next to any workbook that's open, and keeps it
   locked. The loader treated these as order files, so every build printed two alarming errors —

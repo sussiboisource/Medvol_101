@@ -59,6 +59,31 @@ def main():
     dup_key = [config.SKU_ID_COLUMN, "Order_Number"]
     value_check_cols = ["Amount", "InvoiceAmount", "Quantity", "DiscountOnPTR"]
 
+    # Does (Item_Code, Order_Number) actually identify ONE row? The whole dedup strategy rests on
+    # this. If a single file can list the same SKU twice on one order (different batch, scheme,
+    # or stockist), then "one row per key" is the wrong unit and any rule that keeps a single row
+    # per key would silently delete a real order line. Answer it with data, not assumption.
+    print("\nChecking whether (SKU, Order_Number) repeats WITHIN a single file ...", flush=True)
+    per_file_dupes = (
+        combined.groupby(["_source_file"] + dup_key).size().rename("n").reset_index()
+    )
+    repeats = per_file_dupes[per_file_dupes["n"] > 1]
+    if repeats.empty:
+        print("  No -- the key is unique inside every file, so one key = one order line.")
+    else:
+        print(f"  YES -- {len(repeats):,} key(s) appear more than once inside a single file "
+              f"(max {int(repeats['n'].max())} times). The key does NOT identify one row, so the")
+        print("  same SKU is genuinely listed as multiple lines on one order. Files affected:")
+        for fname, count in repeats["_source_file"].value_counts().items():
+            print(f"    {fname:<50} {count:,} repeated key(s)")
+        worst = repeats.sort_values("n", ascending=False).iloc[0]
+        sample = combined[(combined["_source_file"] == worst["_source_file"])
+                          & (combined[config.SKU_ID_COLUMN] == worst[config.SKU_ID_COLUMN])
+                          & (combined["Order_Number"] == worst["Order_Number"])]
+        print(f"\n  Example ({worst['_source_file']}), the same key on {int(worst['n'])} rows:")
+        cols = [c for c in DETAIL_COLS if c in sample.columns]
+        print(sample[cols].to_string(index=False, max_colwidth=22))
+
     print(f"\nGrouping {len(combined):,} rows by (SKU, Order_Number) ...", flush=True)
     t0 = time.perf_counter()
     grouped = combined.groupby(dup_key)
